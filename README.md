@@ -1247,3 +1247,4 @@ For more details on setting up an OpenTelemetry monitoring stack for Claude Code
 - [VS Code Dev Containers](https://code.visualstudio.com/docs/devcontainers/containers)
 - [Original Reference Implementation](https://github.com/hesreallyhim/claude-code-containers/tree/main/containers/node-python-basic/.devcontainer)
 
+# mosgarage-claude-hq
