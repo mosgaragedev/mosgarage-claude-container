@@ -1,0 +1,69 @@
+# ============================================================
+# mosgarage workspace template — Node.js full-stack
+# Applied by the Docker provisioner when creating a workspace.
+# ============================================================
+
+name:         node-workspace
+display_name: "Node.js Workspace"
+description:  "Node.js 20 LTS + code-server + Express + mosgarage agent"
+icon:         "⬡"
+version:      1
+
+image: docker.io/mosgarage/workspace:latest
+
+resources:
+  cpu_cores: 2
+  memory_gb: 2
+  disk_gb:   20
+
+ports:
+  - port: 8080
+    name: code-server
+    label: "VS Code"
+    share: owner        # owner | org | public
+  - port: 3000
+    name: app
+    label: "App server"
+    share: public
+  - port: 4000
+    name: api
+    label: "API server"
+    share: public
+
+env:
+  NODE_ENV: production
+  CODE_SERVER_PASSWORD: "{{.WorkspaceAgentToken | slice 0 12}}"
+
+startup_script: |
+  #!/bin/bash
+  set -e
+  # Install workspace dependencies
+  cd ~/workspace
+  [ -f package.json ] && npm install --prefer-offline
+  # Start supervisor (code-server + node + api + agent)
+  exec /usr/local/bin/workspace-start
+
+git_clone:
+  url:    "{{.GitUrl}}"
+  branch: "{{.GitBranch | default \"main\"}}"
+  path:   ~/workspace
+
+auto_stop:
+  enabled:          true
+  idle_timeout_min: 120   # stop after 2h with no active connections
+
+metadata:
+  - key:   workspace_url
+    display_name: "Workspace URL"
+    script: echo "https://{{.TunnelDna}}.try.mosgarage.app"
+  - key:   code_server_url
+    display_name: "VS Code"
+    script: echo "https://code.{{.TunnelDna}}.try.mosgarage.app"
+  - key:   node_version
+    display_name: "Node.js"
+    script: node --version
+    interval: 3600
+  - key:   git_branch
+    display_name: "Branch"
+    script: cd ~/workspace && git branch --show-current 2>/dev/null || echo "n/a"
+    interval: 60

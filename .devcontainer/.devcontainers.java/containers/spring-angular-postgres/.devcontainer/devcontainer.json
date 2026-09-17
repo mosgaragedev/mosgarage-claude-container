@@ -1,0 +1,29 @@
+{
+  "name": "Fullstack Dev Environment",
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "postCreateCommand": ".devcontainer/install.sh",
+  "mounts": [
+    "source=${localEnv:HOME}/.gitconfig,target=/home/devUser/.gitconfig,type=bind,consistency=cached",
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "vscjava.vscode-java-pack",
+        "vscjava.vscode-gradle",
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+      }
+    }
+  },
+  "forwardPorts": [
+    8080,
+    4200,
+    5432
+  ],
+  "remoteUser": "root"
+}

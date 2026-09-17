@@ -1,10 +1,10 @@
 #!/bin/bash
-# SessionStart Hook - DevContainer Environment Check
+# SessionStart Hook - mosgarage-claude-hq
 # This hook runs at the start of each Claude Code session to verify devcontainer setup
 
 set -e
 
-echo "🔍 Claude Code DevContainer - Environment Check"
+echo "🔍 mosgarage-claude-hq - Environment Check"
 echo "================================================"
 
 # Detect if running in a devcontainer

@@ -103,3 +103,19 @@ Icon
 
 # Windows
 $RECYCLE.BIN/
+
+# Windows NTFS metadata (downloaded file markers)
+*:Zone.Identifier
+
+# Nested git repositories (kept independent, not tracked by outer repo)
+.devcontainer/ubuntu-dev/
+.claude/claude-vps-setup/
+claude_in_devcontainer/
+workspaces/google-remote/
+
+# Node install artifacts (reinstallable)
+workspaces/node_modules/
+
+# VS Code host-level files (belong to the host install, not the repo)
+argv.json
+webServerApiSettings.json

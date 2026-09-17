@@ -1,0 +1,33 @@
+{
+  "name": "Python Poetry Environment",
+  "image": "python:3.12-slim",
+  "postCreateCommand": ".devcontainer/install.sh",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind,consistency=delegated",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "workbench": {
+          "iconTheme": "vscode-icons"
+        },
+        "editor": {
+          "formatOnSave": true,
+          "defaultFormatter": "ms-python.black-formatter",
+          "codeActionsOnSave": {
+            "source.organizeImports": true
+          }
+        }
+      },
+      "extensions": [
+        "vscode-icons-team.vscode-icons",
+        "shardulm94.trailing-spaces",
+        "tamasfe.even-better-toml",
+        "ms-python.mypy-type-checker",
+        "ms-python.flake8",
+        "ms-python.black-formatter",
+        "ms-python.isort"
+      ]
+    }
+  },
+  "remoteUser": "root"
+}

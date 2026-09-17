@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bootstrap Engine | Enterprise DevOps</title>
+<style>
+    :root {
+        --bg: #ffffff; --text: #1d1d1f; --secondary: #86868b;
+        --accent: #0071e3; --card-bg: #f5f5f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased;
+    }
+    nav {
+        position: sticky; top: 0; z-index: 100;
+        background: rgba(255,255,255,0.8); backdrop-filter: blur(20px);
+        padding: 15px 40px; border-bottom: 1px solid rgba(0,0,0,0.1);
+        display: flex; justify-content: space-between; align-items: center;
+    }
+    nav .logo { font-weight: 600; font-size: 20px; letter-spacing: -0.02em; }
+    .hero {
+        text-align: center; padding: 120px 20px 80px;
+        background: linear-gradient(180deg, #ffffff 0%, #f5f5f7 100%);
+    }
+    .hero h1 { font-size: 64px; font-weight: 600; letter-spacing: -0.005em; margin-bottom: 10px; }
+    .hero p { font-size: 24px; color: var(--secondary); max-width: 600px; margin: 0 auto 40px; line-height: 1.4; }
+    .btn {
+        background: var(--accent); color: white; padding: 12px 24px;
+        border-radius: 980px; text-decoration: none; font-size: 17px;
+        display: inline-block; margin: 0 10px; transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn-outline { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+    .section { padding: 80px 20px; max-width: 1200px; margin: 0 auto; }
+    .section h2 { font-size: 48px; text-align: center; margin-bottom: 60px; font-weight: 600; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 40px; }
+    .card {
+        background: var(--card-bg); border-radius: 24px; padding: 40px;
+        transition: transform 0.3s ease;
+    }
+    .card:hover { transform: translateY(-5px); }
+    .card h3 { font-size: 28px; margin-bottom: 12px; }
+    .card p { color: var(--secondary); line-height: 1.5; font-size: 17px; }
+    .ms-integration {
+        background: linear-gradient(135deg, #0078d4 0%, #005a9e 100%);
+        color: white; text-align: center; padding: 100px 20px; margin: 80px 0;
+    }
+    .ms-integration h2 { color: white; border: none; }
+    .ms-badge {
+        display: inline-block; background: rgba(255,255,255,0.2); backdrop-filter: blur(10px);
+        padding: 10px 20px; border-radius: 980px; margin-top: 20px; font-weight: 500;
+        border: 1px solid rgba(255,255,255,0.3);
+    }
+    footer { text-align: center; padding: 40px 20px; color: var(--secondary); font-size: 14px; border-top: 1px solid rgba(0,0,0,0.1); }
+</style>
+</head>
+<body>
+<nav>
+    <div class="logo">Bootstrap Engine</div>
+    <div><a href="#features" class="btn btn-outline" style="padding: 8px 16px; font-size: 14px;">Docs</a></div>
+</nav>
+<header class="hero">
+    <h1>Automate. Integrate. Recover.</h1>
+    <p>The ultimate bootstrap container for cloning, inspecting, and recovering Docker volumes at enterprise scale.</p>
+    <a href="#" class="btn">Get Started</a>
+    <a href="#" class="btn btn-outline">View on GitHub</a>
+</header>
+<section class="section" id="features">
+    <h2>Built for Modern Stacks</h2>
+    <div class="grid">
+        <div class="card">
+            <h3>Zero-Config Cloning</h3>
+            <p>Automates SSH injections and Git LFS setups to seamlessly clone private repositories directly into persistent Docker volumes.</p>
+        </div>
+        <div class="card">
+            <h3>Volume Inspection</h3>
+            <p>Equipped with the Docker CLI and essential dev tools to inspect container states, volumes, and network layers dynamically.</p>
+        </div>
+        <div class="card">
+            <h3>Disaster Recovery</h3>
+            <p>One-command backups and snapshot routines mapped to CI/CD pipelines, ensuring your volume data is never truly lost.</p>
+        </div>
+    </div>
+</section>
+<section class="ms-integration">
+    <h2>Deep Microsoft Integration</h2>
+    <p style="font-size: 24px; max-width: 800px; margin: 0 auto 30px; opacity: 0.9;">
+        Pre-configured for the Microsoft Developer Sandbox (<code>igedevteam.onmicrosoft.com</code>) and Azure CLI.
+        Automate tenant logins, provision resources, and sync volumes with Azure Blob storage natively.
+    </p>
+    <div class="ms-badge">🏆 Certified Microsoft Partner</div>
+    <div class="ms-badge" style="margin-left: 10px;">Azure Sandbox Ready</div>
+</section>
+<section class="section">
+    <h2>Powered by Elegance</h2>
+    <p style="text-align: center; color: var(--secondary); max-width: 700px; margin: 0 auto; font-size: 19px;">
+        We believe infrastructure should not only work flawlessly but look beautiful doing it.
+        Our GitHub Pages UI and documentation are crafted with an obsessive attention to typography, whitespace, and user experience.
+    </p>
+</section>
+<footer>
+    <p>&copy; 2026 Bootstrap Engine. Automated via GitHub Actions to Docker Hub & GHCR.</p>
+</footer>
+</body>
+</html>

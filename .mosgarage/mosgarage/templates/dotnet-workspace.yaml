@@ -1,0 +1,54 @@
+# ============================================================
+# mosgarage workspace template — .NET 8
+# ============================================================
+
+name:         dotnet-workspace
+display_name: ".NET 8 Workspace"
+description:  ".NET 8 SDK + code-server + ASP.NET + mosgarage agent"
+icon:         "🔷"
+version:      1
+
+image: docker.io/mosgarage/workspace-dotnet:latest
+
+resources:
+  cpu_cores: 2
+  memory_gb: 4
+  disk_gb:   20
+
+ports:
+  - port: 8080
+    name: code-server
+    label: "VS Code"
+    share: owner
+  - port: 5000
+    name: aspnet
+    label: "ASP.NET"
+    share: public
+  - port: 5001
+    name: aspnet-https
+    label: "ASP.NET HTTPS"
+    share: public
+
+env:
+  DOTNET_ENVIRONMENT: Development
+  ASPNETCORE_URLS:    "http://+:5000"
+
+startup_script: |
+  #!/bin/bash
+  set -e
+  cd ~/workspace
+  [ -f "*.sln" ] && dotnet restore
+  exec /usr/local/bin/workspace-start
+
+auto_stop:
+  enabled:          true
+  idle_timeout_min: 180
+
+metadata:
+  - key:   dotnet_version
+    display_name: ".NET SDK"
+    script: dotnet --version
+    interval: 3600
+  - key:   workspace_url
+    display_name: "App URL"
+    script: echo "https://{{.TunnelDna}}.try.mosgarage.app"

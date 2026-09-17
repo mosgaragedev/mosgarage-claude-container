@@ -1,0 +1,751 @@
+openapi: 3.1.0
+info:
+  title: MoGarage Dev Control Plane API
+  description: >
+    The control-plane API for MoGarage Dev, a cloud platform for deploying
+    and hosting applications (PaaS). Manages teams, projects, environments,
+    deployments, environment variables, and custom domains.
+  version: 1.0.0
+  contact:
+    name: MoGarage Dev
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Local development
+  - url: https://api.mogarage.dev/v1
+    description: Production (placeholder)
+
+tags:
+  - name: Health
+  - name: Users
+  - name: Teams
+  - name: Projects
+  - name: Environments
+  - name: EnvVars
+  - name: Deployments
+  - name: Domains
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  time: { type: string, format: date-time }
+
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get the current authenticated user
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+
+  /teams:
+    get:
+      tags: [Teams]
+      summary: List teams the current user belongs to
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+      responses:
+        "200":
+          description: Paginated list of teams
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamList" }
+    post:
+      tags: [Teams]
+      summary: Create a team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /teams/{teamId}:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    get:
+      tags: [Teams]
+      summary: Get a team
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Teams]
+      summary: Update a team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Team" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Teams]
+      summary: Delete a team
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /teams/{teamId}/members:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    get:
+      tags: [Teams]
+      summary: List team members
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TeamMember" }
+    post:
+      tags: [Teams]
+      summary: Invite/add a member to the team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamMemberInput" }
+      responses:
+        "201":
+          description: Added
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamMember" }
+
+  /teams/{teamId}/members/{userId}:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+      - name: userId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Teams]
+      summary: Change a member's role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { $ref: "#/components/schemas/TeamRole" }
+              required: [role]
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamMember" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Teams]
+      summary: Remove a member from the team
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects:
+    get:
+      tags: [Projects]
+      summary: List projects
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+        - name: teamId
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Paginated list of projects
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProjectList" }
+    post:
+      tags: [Projects]
+      summary: Create a project
+      description: >
+        Creating a project automatically provisions a default `production`
+        environment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProjectInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /projects/{projectId}:
+    parameters:
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      tags: [Projects]
+      summary: Get a project
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Projects]
+      summary: Update a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProjectUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Projects]
+      summary: Delete a project (and its environments/deployments)
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{projectId}/environments:
+    parameters:
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      tags: [Environments]
+      summary: List environments for a project
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Environment" }
+    post:
+      tags: [Environments]
+      summary: Create an environment (e.g. staging, preview-123)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnvironmentInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Environment" }
+
+  /environments/{environmentId}:
+    parameters:
+      - $ref: "#/components/parameters/EnvironmentId"
+    get:
+      tags: [Environments]
+      summary: Get an environment
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Environment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Environments]
+      summary: Delete an environment
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Cannot delete the production environment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /environments/{environmentId}/env-vars:
+    parameters:
+      - $ref: "#/components/parameters/EnvironmentId"
+    get:
+      tags: [EnvVars]
+      summary: List environment variables (values redacted)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/EnvVar" }
+    post:
+      tags: [EnvVars]
+      summary: Set an environment variable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnvVarInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvVar" }
+
+  /env-vars/{envVarId}:
+    parameters:
+      - $ref: "#/components/parameters/EnvVarId"
+    patch:
+      tags: [EnvVars]
+      summary: Update an environment variable's value
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                value: { type: string }
+              required: [value]
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvVar" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [EnvVars]
+      summary: Delete an environment variable
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /projects/{projectId}/deployments:
+    parameters:
+      - $ref: "#/components/parameters/ProjectId"
+    get:
+      tags: [Deployments]
+      summary: List deployments for a project
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/PageSizeParam"
+        - name: environmentId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/DeploymentStatus" }
+      responses:
+        "200":
+          description: Paginated list of deployments
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeploymentList" }
+    post:
+      tags: [Deployments]
+      summary: Trigger a new deployment
+      description: >
+        Queues a new deployment for the given environment. In this reference
+        implementation the build lifecycle (`queued` -> `building` ->
+        `ready`/`error`) is simulated; wire this up to real build workers when
+        you're ready.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeploymentInput" }
+      responses:
+        "201":
+          description: Deployment queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deployment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /deployments/{deploymentId}:
+    parameters:
+      - $ref: "#/components/parameters/DeploymentId"
+    get:
+      tags: [Deployments]
+      summary: Get a deployment
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deployment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Deployments]
+      summary: Cancel a deployment
+      responses:
+        "204": { description: Cancelled }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Deployment is already in a terminal state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /deployments/{deploymentId}/logs:
+    parameters:
+      - $ref: "#/components/parameters/DeploymentId"
+    get:
+      tags: [Deployments]
+      summary: Get build/deploy logs for a deployment
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deploymentId: { type: string, format: uuid }
+                  lines:
+                    type: array
+                    items: { type: string }
+
+  /deployments/{deploymentId}/promote:
+    parameters:
+      - $ref: "#/components/parameters/DeploymentId"
+    post:
+      tags: [Deployments]
+      summary: Promote a ready deployment to production
+      responses:
+        "200":
+          description: Promoted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deployment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Deployment is not in a promotable state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /environments/{environmentId}/domains:
+    parameters:
+      - $ref: "#/components/parameters/EnvironmentId"
+    get:
+      tags: [Domains]
+      summary: List domains attached to an environment
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Domain" }
+    post:
+      tags: [Domains]
+      summary: Attach a custom domain to an environment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Domain" }
+
+  /domains/{domainId}:
+    parameters:
+      - $ref: "#/components/parameters/DomainId"
+    delete:
+      tags: [Domains]
+      summary: Detach a domain
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSizeParam:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    TeamId:
+      name: teamId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    EnvironmentId:
+      name: environmentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    EnvVarId:
+      name: envVarId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DeploymentId:
+      name: deploymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    DomainId:
+      name: domainId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        details: { type: array, items: { type: string } }
+      required: [error]
+
+    Pagination:
+      type: object
+      properties:
+        page: { type: integer }
+        pageSize: { type: integer }
+        total: { type: integer }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        name: { type: string }
+        createdAt: { type: string, format: date-time }
+      required: [id, email, name, createdAt]
+
+    TeamRole:
+      type: string
+      enum: [owner, admin, member]
+
+    Team:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        ownerId: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, name, slug, ownerId, createdAt, updatedAt]
+    TeamInput:
+      type: object
+      properties:
+        name: { type: string }
+        slug: { type: string }
+      required: [name, slug]
+    TeamUpdate:
+      type: object
+      properties:
+        name: { type: string }
+    TeamList:
+      type: object
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Team" } }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+    TeamMember:
+      type: object
+      properties:
+        teamId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        role: { $ref: "#/components/schemas/TeamRole" }
+        joinedAt: { type: string, format: date-time }
+      required: [teamId, userId, role, joinedAt]
+    TeamMemberInput:
+      type: object
+      properties:
+        userId: { type: string, format: uuid }
+        role: { $ref: "#/components/schemas/TeamRole" }
+      required: [userId, role]
+
+    ProjectFramework:
+      type: string
+      enum: [node, python, go, static, docker, other]
+    Project:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        teamId: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        repoUrl: { type: string, format: uri }
+        framework: { $ref: "#/components/schemas/ProjectFramework" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, teamId, name, slug, createdAt, updatedAt]
+    ProjectInput:
+      type: object
+      properties:
+        teamId: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        repoUrl: { type: string, format: uri }
+        framework: { $ref: "#/components/schemas/ProjectFramework" }
+      required: [teamId, name, slug]
+    ProjectUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        repoUrl: { type: string, format: uri }
+        framework: { $ref: "#/components/schemas/ProjectFramework" }
+    ProjectList:
+      type: object
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Project" } }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    Environment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        name: { type: string, example: production }
+        isProduction: { type: boolean }
+        latestDeploymentId: { type: string, format: uuid, nullable: true }
+        createdAt: { type: string, format: date-time }
+      required: [id, projectId, name, isProduction, createdAt]
+    EnvironmentInput:
+      type: object
+      properties:
+        name: { type: string }
+      required: [name]
+
+    EnvVar:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        environmentId: { type: string, format: uuid }
+        key: { type: string }
+        value:
+          type: string
+          description: Redacted in list/get responses; only echoed on creation.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, environmentId, key, createdAt, updatedAt]
+    EnvVarInput:
+      type: object
+      properties:
+        key: { type: string }
+        value: { type: string }
+      required: [key, value]
+
+    DeploymentStatus:
+      type: string
+      enum: [queued, building, deploying, ready, error, canceled]
+    Deployment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
+        environmentId: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/DeploymentStatus" }
+        commitSha: { type: string }
+        commitMessage: { type: string }
+        url: { type: string, format: uri, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        readyAt: { type: string, format: date-time, nullable: true }
+      required: [id, projectId, environmentId, status, createdAt, updatedAt]
+    DeploymentInput:
+      type: object
+      properties:
+        environmentId: { type: string, format: uuid }
+        commitSha: { type: string }
+        commitMessage: { type: string }
+      required: [environmentId, commitSha]
+    DeploymentList:
+      type: object
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Deployment" } }
+        pagination: { $ref: "#/components/schemas/Pagination" }
+
+    Domain:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        environmentId: { type: string, format: uuid }
+        hostname: { type: string }
+        verified: { type: boolean }
+        createdAt: { type: string, format: date-time }
+      required: [id, environmentId, hostname, verified, createdAt]
+    DomainInput:
+      type: object
+      properties:
+        hostname: { type: string }
+      required: [hostname]

@@ -1,0 +1,56 @@
+// .devcontainer/devcontainer.json
+{
+  "name": "Mosgarage AI Dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "args": {
+      "NODE_VERSION": "22",
+      "PYTHON_VERSION": "3.12"
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:4.0.0": {},
+  },
+  "customizations": {
+    "antigravity": {
+      "extensions": [],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      }
+    }
+  },
+  "forwardPorts": [3000, 5432, 6379],
+  "postCreateCommand": "npm install && npm run setup",
+  "postStartCommand": "echo '✅ Dev Container ready'",
+  "remoteUser": "node"
+},
+{
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "source=antigravity-node-modules,target=/workspace/node_modules,type=volume",
+    "source=antigravity-next-cache,target=/workspace/.next,type=volume"
+  ]
+},
+{
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached"
+},
+{
+  "containerEnv": {
+    "NODE_ENV": "development",
+    "LOG_LEVEL": "debug",
+    "API_BASE_URL": "http://localhost:3000"
+  },
+  "secrets": {
+    "DATABASE_URL": {
+      "description": "PostgreSQL connection string",
+      "documentationUrl": "https://wiki.mosgarage.xyz/db-setup"
+    },
+    "STRIPE_SECRET_KEY": {
+      "description": "Stripe API secret key (test mode)"
+    }
+  }
+}

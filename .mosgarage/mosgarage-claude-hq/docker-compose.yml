@@ -1,0 +1,25 @@
+version: '3.8'
+services:
+  bootstrap-engine:
+    image: ghcr.io/mosgarage/mosgarage-claude-hq:latest
+    # Build locally if testing: build: .
+    volumes:
+      - target_volume:/data
+      - /var/run/docker.sock:/var/run/docker.sock # Host Docker CLI access
+    environment:
+      - REPO_URL=git@github.com:mosgaragedev/mosgarage-claude-hq.git
+      - VOLUME_NAME=mosgarage/mosgarage-claude-hq
+      - MOUNT_POINT=/data
+      - SSH_KEY=${GIT_SSH_KEY} # Pass via .env or CI secrets
+      - AZURE_TENANT=igedevteam.onmicrosoft.com
+      - AZURE_CLIENT_ID=3d47872a-3a01-4773-bae5-56c1448d5147
+      - AZURE_CLIENT_SECRET=
+    # Usage Examples:
+    # command: ["clone"]
+    # command: ["inspect"]
+    # command: ["recover"]
+    command: ["clone"]
+
+volumes:
+  target_volume:
+    driver: local

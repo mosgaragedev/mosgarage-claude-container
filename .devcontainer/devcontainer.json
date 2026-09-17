@@ -1,148 +1,281 @@
 {
-  "name": "Claude Code - ${localWorkspaceFolderBasename}",
-  "init": true,
-  "build": {
-    "dockerfile": "Dockerfile",
-    "args": {
-      "TZ": "${localEnv:TZ:Australia/Brisbane}",
-      "CLAUDE_CODE_VERSION": "latest",
-      "GIT_DELTA_VERSION": "0.18.2",
-      "ZSH_IN_DOCKER_VERSION": "1.2.1"
-    }
-  },
+  // ============================================================================
+  // DEVCONTAINER CONFIGURATION - DOCKER COMPOSE MODE
+  // ============================================================================
+  // This DevContainer uses Docker Compose to orchestrate multiple containers:
+  // 1. workspace: Main development environment (this container)
+  // 2. playwright: Browser automation service (separate container)
+  //
+  // Key changes from single-container setup:
+  // - Uses dockerComposeFile instead of image
+  // - Specifies which service to connect to
+  // - Volumes and networking handled by docker-compose.yml
+  // - Playwright service runs independently
+  //
+  // For more information: https://containers.dev/
+  // ============================================================================
+
+  // Container display name in VS Code
+  "name": "Claude Code - Multi-Container Development",
+
+  // ============================================================================
+  // DOCKER COMPOSE CONFIGURATION
+  // ============================================================================
+  // Instead of using "image", we use Docker Compose to manage multiple services
+  // VS Code will:
+  // 1. Run initializeCommand (init-profiles.sh) to configure services
+  // 2. Run docker-compose up with configured profiles
+  // 3. Connect to the workspace service
+  // 4. Optional services start based on .env configuration
+  // ============================================================================
+
+  // Initialize command runs BEFORE docker-compose
+  // Generates .env.profiles from .env to configure which services to start
+  "initializeCommand": "bash .devcontainer/init-profiles.sh",
+
+  // Path to docker-compose.yml (relative to this file)
+  "dockerComposeFile": "docker-compose.yml",
+
+  // Which service to connect to (VS Code will attach to this container)
+  "service": "workspace",
+
+  // Which services to start (VS Code will run docker-compose with these services)
+  // Note: This explicitly starts services with the "playwright" profile
+  // Services not listed here will only start if they have no profile requirement
+  "runServices": ["workspace", "playwright"],
+
+  // Workspace folder inside the container
+  // This should match the volume mount in docker-compose.yml
+  "workspaceFolder": "/workspaces/claude_in_devcontainer",
+
+  // ============================================================================
+  // OVERRIDE COMMAND
+  // ============================================================================
+  // Set to true to use the command specified in docker-compose.yml
+  // (sleep infinity) instead of the Dockerfile CMD
+  // This keeps the container running so VS Code can connect
+  // ============================================================================
+  "overrideCommand": true,
+
+  // ============================================================================
+  // FEATURES - Modular Additions to Container
+  // ============================================================================
+  // Features are pre-packaged scripts that install tools and runtimes
+  // These run during container build time
+  //
+  // Note: These features are applied to the workspace service only
+  // The playwright service has its own Dockerfile
+  // ============================================================================
   "features": {
-    "ghcr.io/devcontainers/features/common-utils:2": {
-      "installZsh": false,
-      "installOhMyZsh": false,
-      "upgradePackages": false,
-      "username": "node",
-      "userUid": "automatic",
-      "userGid": "automatic"
+    // -------------------------------------------------------------------------
+    // Node.js Runtime
+    // -------------------------------------------------------------------------
+    // Installs Node.js 22 (LTS) and npm
+    // Required for JavaScript/TypeScript development and npm packages
+    // -------------------------------------------------------------------------
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
     },
-    "ghcr.io/devcontainers/features/git:1": {
-      "version": "latest",
-      "ppa": false
+
+    // -------------------------------------------------------------------------
+    // GitHub CLI
+    // -------------------------------------------------------------------------
+    // Command-line tool for GitHub operations (gh command)
+    // Version pinned for security and reproducibility
+    // -------------------------------------------------------------------------
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "2.51.0"
     },
-    "ghcr.io/devcontainers/features/go:1": {
-      "version": "none"
-    },
-    "ghcr.io/devcontainers/features/rust:1": "latest"
+
+    // -------------------------------------------------------------------------
+    // Docker-outside-of-Docker (DooD)
+    // -------------------------------------------------------------------------
+    // Enables Docker CLI in workspace container to control host Docker daemon
+    // Socket is mounted via docker-compose.yml volume
+    // -------------------------------------------------------------------------
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
-  "hostRequirements": {
-    "cpus": 4,
-    "memory": "8gb",
-    "storage": "32gb"
-  },
-  "runArgs": [
-    "--cap-drop=ALL",
-    "--cap-add=NET_ADMIN",
-    "--cap-add=NET_RAW",
-    "--cap-add=SETUID",
-    "--cap-add=SETGID",
-    "--cap-add=SYS_ADMIN",
-    "--sysctl=net.ipv6.conf.all.disable_ipv6=1",
-    "--sysctl=net.ipv6.conf.default.disable_ipv6=1",
-    "--sysctl=net.ipv6.conf.lo.disable_ipv6=1",
-    "--add-host=host.docker.internal:host-gateway",
-    "--network=claude-code-opentelemetry_otel",
-    "--env-file=${localWorkspaceFolder}/.env"
-  ],
+
+  // ============================================================================
+  // POST-CREATE COMMAND
+  // ============================================================================
+  // Script that runs ONCE after the container is created
+  // This is where heavy setup work happens (Python packages, venv, etc.)
+  //
+  // Note: Uses workspace/post-create.sh (no browser dependencies)
+  // ============================================================================
+  "postCreateCommand": "bash .devcontainer/workspace/post-create.sh",
+
+  // ============================================================================
+  // VS CODE CUSTOMIZATIONS
+  // ============================================================================
+  // Extensions and settings for the development environment
+  // ============================================================================
   "customizations": {
     "vscode": {
+      // -----------------------------------------------------------------------
+      // VS CODE EXTENSIONS
+      // -----------------------------------------------------------------------
+      // These extensions are automatically installed in the container
+      // -----------------------------------------------------------------------
       "extensions": [
         "anthropic.claude-code",
-        "dbaeumer.vscode-eslint",
-        "esbenp.prettier-vscode",
-        "eamodio.gitlens",
-        "openai.chatgpt",
-        "sst-dev.opencode",
-        "google.gemini-cli-vscode-ide-companion",
-        "google.geminicodeassist",
-        "github.copilot",
-        "github.copilot-chat",
-        "kilocode.kilo-code",
-        "timonwong.shellcheck",
-        "saoudrizwan.claude-dev",
-        "scootersoftware.bcompare-vscode",
-        "tamasfe.even-better-toml",
-        "ms-toolsai.jupyter-keymap",
-        "ms-vscode.sublime-keybindings",
-        "grapecity.gc-excelviewer",
-        "imgildev.vscode-json-flow",
         "ms-python.python",
         "ms-python.vscode-pylance",
         "ms-python.debugpy",
-        "redhat.vscode-yaml",
-        "golang.Go"
+        "ms-toolsai.jupyter",
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint",
+        "eamodio.gitlens",
+        "usernamehw.errorlens",
+        "ms-azuretools.vscode-docker",
+        "streetsidesoftware.code-spell-checker",
+        "christian-kohler.path-intellisense",
+        "wayou.vscode-todo-highlight",
+        "pkief.material-icon-theme",
+        "ms-playwright.playwright",
+        "formulahendry.docker-extension-pack",
+        "ms-azuretools.vscode-containers",
+        "Anthropic.claude-code",
+        "cjnoname.claude-terminal",
+        "Google.google-antigravity",
+        "lyadhgod.antigravity-vscode",
+        "googlecloudtools.cloudcode",
+        "googlecloudtools.datacloud",
+        "Google.geminicodeassist",
+        "ms-python.vscode-python-envs",
+        "EstevamSouza.generate-python-project",
+        "daytonaio.daytona",
+        "docker.docker",
+        "magnobiet.docker-extension-pack",
+        "delgee.sld-docker-builder",
+        "Kingleo.qwen",
+        "google.geminicodeassist"
       ],
+
+      // -----------------------------------------------------------------------
+      // VS CODE SETTINGS
+      // -----------------------------------------------------------------------
       "settings": {
+        // Auto-format on save
         "editor.formatOnSave": true,
+
+        // Default formatter
         "editor.defaultFormatter": "esbenp.prettier-vscode",
-        "editor.codeActionsOnSave": {
-          "source.fixAll.eslint": "explicit"
+
+        // Python-specific formatter
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.black-formatter"
         },
-        "go.toolsManagement.checkForUpdates": "local",
-        "go.useLanguageServer": true,
-        "go.gopath": "/go",
-        "terminal.integrated.defaultProfile.linux": "zsh",
-        "terminal.integrated.profiles.linux": {
-          "bash": {
-            "path": "bash",
-            "icon": "terminal-bash"
-          },
-          "zsh": {
-            "path": "zsh"
-          }
-        }
+
+        // Python interpreter path (virtual environment)
+        "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",
+
+        // Python linting
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": true,
+
+        // Python formatting
+        "python.formatting.provider": "black"
       }
     }
   },
-  "remoteUser": "node",
-  "mounts": [
-    "source=claude-code-bashhistory-${devcontainerId},target=/commandhistory,type=volume",
-    "source=claude-code-config-${devcontainerId},target=/home/node/.claude,type=volume",
-    "source=codex-config-${devcontainerId},target=/home/node/.codex,type=volume",
-    "source=gemini-config-${devcontainerId},target=/home/node/.gemini,type=volume",
-    "source=opencode-config-${devcontainerId},target=/home/node/.opencode,type=volume",
-    "source=ghub-config-${devcontainerId},target=/home/node/.config/gh,type=volume",
-    "source=npm-global-${devcontainerId},target=/home/node/.npm-global,type=volume",
-    "source=cargo-${devcontainerId},target=/home/node/.cargo,type=volume",
-    "source=bun-${devcontainerId},target=/home/node/.bun,type=volume",
-    "source=local-bin-${devcontainerId},target=/home/node/.local,type=volume",
-    "source=aws-config-${devcontainerId},target=/home/node/.aws,type=volume",
-    "source=wrangler-config-${devcontainerId},target=/home/node/.wrangler,type=volume",
-    "source=vercel-config-${devcontainerId},target=/home/node/.vercel,type=volume"
-  ],
-  "containerEnv": {
-    "NODE_OPTIONS": "--max-old-space-size=4096",
-    "CLAUDE_CONFIG_DIR": "/home/node/.claude",
-    "POWERLEVEL9K_DISABLE_GITSTATUS": "true",
-    "NPM_CONFIG_PREFIX": "/home/node/.npm-global"
-    // "CLAUDE_CODE_ENABLE_TELEMETRY": "1"
-    // "OTEL_LOG_USER_PROMPTS": "1",
-    // "OTEL_METRICS_EXPORTER": "otlp",
-    // "OTEL_LOGS_EXPORTER": "otlp",
-    // "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
-    // "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
-    // "OTEL_RESOURCE_ATTRIBUTES": "deployment.environment=devcontainer,service.name=claude-code"
-  },
-  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
-  "forwardPorts": [3000, 8080, 8888],
-  "portsAttributes": {
-    "3000": {
-      "label": "Gemini Server",
-      "onAutoForward": "silent"
-    },
-    "8080": {
-      "label": "Development Server",
-      "onAutoForward": "silent"
-    },
-    "8888": {
-      "label": "Jupyter/Lab",
-      "onAutoForward": "silent"
-    }
-  },
-  "postCreateCommand": "npm install -g npm@latest && npm install -g @anthropic-ai/claude-code@latest --verbose && npm install -g @openai/codex && npm install -g @google/gemini-cli && npm install -g opencode-ai@latest && npm install -g wrangler@latest && npm install -g vercel@latest && ls -lah /home/node/.claude && /usr/local/bin/init-claude-config.sh && /usr/local/bin/init-claude-hooks.sh && /usr/local/bin/init-codex-config.sh && /usr/local/bin/init-opencode-config.sh && /usr/local/bin/init-python.sh",
-  "postStartCommand": "sudo /usr/local/bin/init-firewall.sh && bash ${containerWorkspaceFolder}/.devcontainer/setup-git-hooks.sh",
-  "waitFor": "postCreateCommand"
+
+  // ============================================================================
+  // REMOTE USER
+  // ============================================================================
+  // User account to use when connecting to the container
+  // Non-root user for security best practices
+  // ============================================================================
+  "remoteUser": "vscode",
+
+  // ============================================================================
+  // PORT FORWARDING
+  // ============================================================================
+  // Ports automatically forwarded from container to host
+  // These are defined in docker-compose.yml and will be auto-detected
+  //
+  // Common port usage:
+  // - 3001: Node.js, React, Next.js
+  // - 4000: GraphQL servers
+  // - 5000: Flask, Python web apps
+  // - 5173: Vite dev server
+  // - 8000: FastAPI, Django
+  // - 8080: Alternative HTTP
+  // - 8888: Jupyter Lab
+  // ============================================================================
+  "forwardPorts": [3001, 4000, 5000, 5173, 8000, 8080, 8888],
+
+  // ============================================================================
+  // DOCKER COMPOSE SPECIFIC SETTINGS
+  // ============================================================================
+  // Additional settings for Docker Compose mode
+  // ============================================================================
+
+  // Run docker-compose down when VS Code closes (default behavior)
+  // Options: "none" (leave running) or "stopCompose" (stop all services)
+  "shutdownAction": "stopCompose",
+
+  // ============================================================================
+  // REMOVED SETTINGS (Now in docker-compose.yml)
+  // ============================================================================
+  // These settings were moved to docker-compose.yml:
+  // - runArgs (now in service definition)
+  // - mounts (now in volumes section)
+  // - containerEnv (now in environment section)
+  //
+  // Why moved?
+  // - Better organization in compose file
+  // - Shared configuration between services
+  // - Easier to manage multi-container setup
+  // - Standard Docker Compose patterns
+  // ============================================================================
+
+  // ============================================================================
+  // NOTES FOR MODULAR MULTI-CONTAINER SETUP
+  // ============================================================================
+  // Important features of this config-driven setup:
+  //
+  // 1. Service Configuration:
+  //    - Edit .devcontainer/.env to enable/disable services
+  //    - Set ENABLE_PLAYWRIGHT=true to activate browser automation
+  //    - IMPORTANT: Currently, Playwright service is in runServices above
+  //    - To disable Playwright: Remove "playwright" from runServices array
+  //    - Changes require container rebuild
+  //    - Core workspace always runs regardless of optional services
+  //
+  // 2. Container Communication:
+  //    - Workspace can reach enabled services via Docker DNS
+  //    - Example: http://playwright:3000 (if enabled)
+  //    - Services are isolated in separate containers
+  //
+  // 3. Startup Order:
+  //    - init-profiles.sh runs first (generates .env.profiles)
+  //    - Docker Compose starts enabled services
+  //    - VS Code connects to workspace
+  //    - Optional services start in background
+  //
+  // 4. Volume Management:
+  //    - Named volumes for persistence
+  //    - Shared volumes for artifacts (if services need them)
+  //    - Bind mount for source code
+  //
+  // 5. Rebuilding:
+  //    - docker-compose build              (rebuild all enabled services)
+  //    - docker-compose build workspace    (rebuild workspace only)
+  //    - docker-compose build playwright   (rebuild playwright only, if enabled)
+  //
+  // 6. Debugging:
+  //    - docker-compose ps                 (check status of enabled services)
+  //    - docker-compose logs -f            (follow logs)
+  //    - docker-compose logs playwright    (playwright logs, if enabled)
+  //    - docker exec claude-workspace bash (shell in workspace)
+  //
+  // 7. Adding New Services:
+  //    - Add ENABLE_SERVICENAME=false to .env
+  //    - Add profile conversion to init-profiles.sh
+  //    - Add service definition with profiles: ["${SERVICENAME_PROFILE:-disabled}"]
+  //    - See services/README.md for templates
+  //
+  // ============================================================================
 }

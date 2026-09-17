@@ -1,0 +1,25 @@
+version: "3.8"
+services:
+  api:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - API_TOKEN=
+    restart: unless-stopped
+
+  # Placeholder for when you move off the in-memory store.
+  # db:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: mogarage
+  #     POSTGRES_PASSWORD: mogarage
+  #     POSTGRES_DB: mogarage
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - db-data:/var/lib/postgresql/data
+
+# volumes:
+#   db-data:
