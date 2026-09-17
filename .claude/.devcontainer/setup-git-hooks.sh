@@ -9,9 +9,13 @@
 # Strict error handling
 set -euo pipefail
 
-# Dynamically resolve repository root
+# Dynamically resolve repository root from git itself (works from any script location,
+# including worktrees and submodules)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR/../.." rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$REPO_ROOT" ]; then
+    REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
 HOOKS_DIR="$REPO_ROOT/.git/hooks"
 
 # Validate git repository (works with worktrees and submodules)

@@ -1,0 +1,96 @@
+{
+  "_comment": "Termius Host Configuration Template for Claude VPS",
+  "_note": "Termius doesn't support direct JSON import, but this documents the configuration. Use Termius sync or manually configure these settings.",
+
+  "host": {
+    "label": "Claude VPS",
+    "address": "claude-vps",
+    "port": 22,
+    "username": "claude",
+    "authentication": "ssh_key",
+    "key_label": "Claude VPS Key",
+    "startup_snippet": "claude-attach"
+  },
+
+  "alternative_addresses": {
+    "tailscale_magicdns": "claude-vps.your-tailnet.ts.net",
+    "tailscale_ip": "100.x.x.x",
+    "note": "Get your Tailscale IP with: tailscale ip"
+  },
+
+  "snippets": [
+    {
+      "label": "Attach",
+      "command": "claude-attach",
+      "description": "Attach to existing tmux session"
+    },
+    {
+      "label": "Start Claude",
+      "command": "claude-start",
+      "description": "Start Claude in new tmux session"
+    },
+    {
+      "label": "New Claude",
+      "command": "claude",
+      "description": "Start fresh Claude CLI session"
+    },
+    {
+      "label": "Status",
+      "command": "claude-status",
+      "description": "Check Claude session status"
+    },
+    {
+      "label": "Restart",
+      "command": "claude-restart",
+      "description": "Restart Claude session"
+    },
+    {
+      "label": "Logs",
+      "command": "claude-logs",
+      "description": "View Claude service logs"
+    },
+    {
+      "label": "Task List",
+      "command": "cd ~/Projects && ls -la",
+      "description": "List projects directory"
+    },
+    {
+      "label": "System Status",
+      "command": "htop",
+      "description": "System resource monitor"
+    }
+  ],
+
+  "keyboard_settings": {
+    "extra_keys_row": ["Tab", "Ctrl", "Esc", "-", "|", "[", "]", "Up", "Down"],
+    "enable_toolbar": true,
+    "cursor_keys": true,
+    "function_keys": true
+  },
+
+  "deep_links": {
+    "by_label": "termius://host?label=Claude%20VPS",
+    "by_address": "termius://host?address=claude-vps",
+    "note": "Use these URLs in notifications to open Termius directly to this host"
+  },
+
+  "mosh_settings": {
+    "enabled": false,
+    "note": "Enable Mosh in Termius for better mobile stability. Requires mosh installed on VPS: sudo apt install mosh && sudo ufw allow 60000:61000/udp"
+  },
+
+  "recommended_apps": {
+    "ios_keyboard": "Default iOS keyboard with dictation enabled",
+    "android_keyboard": "Hacker's Keyboard (Play Store) for full key access"
+  },
+
+  "setup_steps": [
+    "1. Install Termius from App Store / Play Store",
+    "2. Create new host with settings above",
+    "3. Generate SSH key in Termius and export public key to VPS",
+    "4. Add public key to ~/.ssh/authorized_keys on VPS",
+    "5. Create snippets for quick commands",
+    "6. Set 'claude-attach' as startup snippet",
+    "7. Test connection"
+  ]
+}

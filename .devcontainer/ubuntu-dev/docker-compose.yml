@@ -1,0 +1,29 @@
+services:
+    mosgarage:
+    image: sonatype/mosgarage3:$mosgarage_VERSION
+    container_name: mosgarage
+    restart: always
+    hostname: mosgarage.localhost
+    ports:
+      - "$mosgarage_81:8081"
+      - "$mosgarage_443:8443"
+    extra_hosts:
+      - "repos.private.network:192.168.200.200"
+    dns:
+      - 192.168.3.7
+      - 192.168.111.1
+      - 192.168.10.5
+      - 192.168.10.15
+    volumes_from:
+      - mosgarage-data
+    networks:
+      - pic
+
+  networks:
+    pic:
+      driver: bridge
+      ipam:
+        driver: default
+        config:
+          - subnet: 172.18.0.0/16
+            gateway: 172.18.0.1

@@ -1,0 +1,6 @@
+noble/app
+.bash*
+.cache
+.local
+.sudo*
+

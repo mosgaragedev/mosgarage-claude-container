@@ -107,11 +107,10 @@ $RECYCLE.BIN/
 # Windows NTFS metadata (downloaded file markers)
 *:Zone.Identifier
 
-# Nested git repositories (kept independent, not tracked by outer repo)
-.devcontainer/ubuntu-dev/
-.claude/claude-vps-setup/
-claude_in_devcontainer/
-workspaces/google-remote/
+# Security: local-only files that contain real secrets (never commit)
+.devcontainer/ubuntu-dev/jammy/Dockerfile
+.devcontainer/ubuntu-dev/noble/Dockerfile
+claude_in_devcontainer/mcp.json
 
 # Node install artifacts (reinstallable)
 workspaces/node_modules/
