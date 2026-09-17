@@ -74,8 +74,10 @@ RUN (mkdir -p /root/.ssh/; \
 # -----------------------------------------------------------------
 
 # Install the authorized key for the "dev" user.
+# mode=0444: BuildKit mounts secrets as root-owned 0400; the non-root build
+# user must be able to read it.
 USER dev
-RUN --mount=type=secret,id=ssh_pub_key \
+RUN --mount=type=secret,id=ssh_pub_key,mode=0444 \
     mkdir -p "${HOME}/.ssh" && chmod 0700 "${HOME}/.ssh" && \
     cp /run/secrets/ssh_pub_key "${HOME}/.ssh/authorized_keys" && \
     chmod 0444 "${HOME}/.ssh/authorized_keys"
