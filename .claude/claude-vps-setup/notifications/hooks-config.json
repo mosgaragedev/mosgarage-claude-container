@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": {},
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/claude-notify/notify-hook.sh notification \"$CLAUDE_NOTIFICATION_MESSAGE\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": {},
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.config/claude-notify/notify-hook.sh stop \"$CLAUDE_STOP_REASON\""
+          }
+        ]
+      }
+    ]
+  }
+}

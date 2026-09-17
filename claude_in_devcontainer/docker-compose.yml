@@ -1,0 +1,11 @@
+services:
+  epic_blackburn:
+    image: mosgarage/codeserver-base:latest
+    container_name: epic_blackburn
+    working_dir: /workspace/claude_in_devcontainer
+    volumes:
+      - /home/devops/workspace/claude_in_devcontainer:/workspace/claude_in_devcontainer:cached
+    command: /bin/bash -lc "cd /workspace/claude_in_devcontainer && exec bash"
+    stdin_open: true
+    tty: true
+    restart: unless-stopped

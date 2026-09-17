@@ -1,0 +1,462 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# mosgarage GitHub Project Board Definition
+# Used by: scripts/setup-github-project.sh
+# Creates: GitHub Project v2 board with all workstreams, milestones, issues
+# ─────────────────────────────────────────────────────────────────────────────
+
+project:
+  title: "mosgarage Platform Roadmap"
+  description: "Full platform build across all workstreams"
+  org: mosgarage
+  visibility: private
+
+# ── Workstreams (GitHub Project custom fields / labels) ───────────────────────
+workstreams:
+  - id: WS-INFRA
+    label: "🏗️ infrastructure"
+    color: "0075ca"
+    description: "Core platform infrastructure — Traefik, PostgreSQL, networking, TLS"
+
+  - id: WS-DAEMON
+    label: "⚙️ mosgaraged"
+    color: "e4e669"
+    description: "Node.js orchestration daemon — health, IPC, lifecycle, versioning"
+
+  - id: WS-CONSOLE
+    label: "💻 console"
+    color: "d93f0b"
+    description: "mosgarage.console — cloud IDE, DevPod, per-user workspaces, dashboard"
+
+  - id: WS-STUDIO
+    label: "🎨 studio"
+    color: "0e8a16"
+    description: "mosgarage.studio — blog, docs, FlipStack, content builder"
+
+  - id: WS-COMMUNITY
+    label: "🤝 community"
+    color: "1d76db"
+    description: "mosgarage.community — Discord bridge, profiles, forum, showcases"
+
+  - id: WS-ACADEMY
+    label: "🎓 academy"
+    color: "5319e7"
+    description: "mosgarage.academy — public courses and learning paths"
+
+  - id: WS-ECAMPUS
+    label: "🏫 ecampus"
+    color: "b60205"
+    description: "mosgarage.ecampus — internal org LMS"
+
+  - id: WS-AGENT
+    label: "🤖 agent"
+    color: "006b75"
+    description: "mosgarage.agent — AI layer across all services"
+
+  - id: WS-DEVENV
+    label: "🛠️ dev-environment"
+    color: "f9d0c4"
+    description: "Local dev setup — WSL, VS Code, Visual Studio, git sync, OneDrive"
+
+  - id: WS-WINDOWS
+    label: "🪟 windows-tooling"
+    color: "c5def5"
+    description: "Windows integrations — context menu, Planner, task automation"
+
+  - id: WS-CICD
+    label: "🚀 ci-cd"
+    color: "bfd4f2"
+    description: "CI/CD — GitHub Actions, versioning, multi-arch builds, deploy"
+
+# ── Milestones ────────────────────────────────────────────────────────────────
+milestones:
+  - id: M1
+    title: "v0.1 — Foundation"
+    description: "Infrastructure, daemon, control plane, console MVP"
+    due: "2025-08-01"
+
+  - id: M2
+    title: "v0.2 — Console GA"
+    description: "Console dashboard, VS/VSCode autoload, workspace management"
+    due: "2025-09-01"
+
+  - id: M3
+    title: "v0.3 — Studio"
+    description: "Blog, docs, FlipStack standalone, content builder"
+    due: "2025-10-01"
+
+  - id: M4
+    title: "v0.4 — Community + Academy"
+    description: "Community portal, Discord bridge, Academy public courses"
+    due: "2025-11-01"
+
+  - id: M5
+    title: "v0.5 — eCampus + Agent"
+    description: "Internal LMS, AI layer across all services"
+    due: "2025-12-01"
+
+  - id: M6
+    title: "v1.0 — Platform GA"
+    description: "All services live, versioned, monitored, documented"
+    due: "2026-01-01"
+
+# ── Issues per workstream ─────────────────────────────────────────────────────
+issues:
+
+  # ── WS-INFRA ────────────────────────────────────────────────────────────────
+  - title: "Set up Traefik v3 with wildcard TLS and forward auth middleware"
+    workstream: WS-INFRA
+    milestone: M1
+    priority: critical
+    labels: ["infrastructure", "traefik"]
+
+  - title: "Configure PostgreSQL 16 with health checks and named volumes"
+    workstream: WS-INFRA
+    milestone: M1
+    priority: critical
+    labels: ["infrastructure", "database"]
+
+  - title: "Define mosgarage.platform.yml service registry schema"
+    workstream: WS-INFRA
+    milestone: M1
+    priority: high
+    labels: ["infrastructure", "config"]
+
+  - title: "Set up Docker networks and volume strategy"
+    workstream: WS-INFRA
+    milestone: M1
+    priority: high
+    labels: ["infrastructure", "docker"]
+
+  - title: "Configure DNS wildcard records (*.mosgarage.xyz, *.console.mosgarage.xyz)"
+    workstream: WS-INFRA
+    milestone: M1
+    priority: critical
+    labels: ["infrastructure", "dns"]
+
+  - title: "Entra ID OIDC app registration — covers all platform services"
+    workstream: WS-INFRA
+    milestone: M1
+    priority: critical
+    labels: ["infrastructure", "auth", "azure"]
+
+  # ── WS-DAEMON ───────────────────────────────────────────────────────────────
+  - title: "mosgaraged: service health polling loop"
+    workstream: WS-DAEMON
+    milestone: M1
+    priority: high
+    labels: ["mosgaraged", "health"]
+
+  - title: "mosgaraged: Unix socket IPC bus"
+    workstream: WS-DAEMON
+    milestone: M1
+    priority: high
+    labels: ["mosgaraged", "ipc"]
+
+  - title: "mosgaraged: idle workspace detection + control plane signal"
+    workstream: WS-DAEMON
+    milestone: M1
+    priority: medium
+    labels: ["mosgaraged", "workspaces"]
+
+  - title: "mosgaraged: HTTP API (health, manifest, services, emit)"
+    workstream: WS-DAEMON
+    milestone: M1
+    priority: high
+    labels: ["mosgaraged", "api"]
+
+  - title: "mosgaraged: systemd service + Docker image (multi-arch)"
+    workstream: WS-DAEMON
+    milestone: M1
+    priority: high
+    labels: ["mosgaraged", "docker"]
+
+  - title: "mosgaraged: platform version tracking + update notifications"
+    workstream: WS-DAEMON
+    milestone: M2
+    priority: medium
+    labels: ["mosgaraged", "versioning"]
+
+  # ── WS-CONSOLE ──────────────────────────────────────────────────────────────
+  - title: "Build mosgarage/console Docker image (code-server + DevPod + DinD)"
+    workstream: WS-CONSOLE
+    milestone: M1
+    priority: critical
+    labels: ["console", "docker"]
+
+  - title: "Rename mosgarage/codeserver → mosgarage/console on Docker Hub"
+    workstream: WS-CONSOLE
+    milestone: M1
+    priority: critical
+    labels: ["console", "docker"]
+
+  - title: "Control plane: workspace provisioning API (create/stop/delete)"
+    workstream: WS-CONSOLE
+    milestone: M1
+    priority: critical
+    labels: ["console", "control-plane", "api"]
+
+  - title: "Per-workspace Traefik dynamic routing (ws-{id}.console.mosgarage.xyz)"
+    workstream: WS-CONSOLE
+    milestone: M1
+    priority: critical
+    labels: ["console", "traefik", "routing"]
+
+  - title: "Container startup automation — ordered init, health gates, readiness probes"
+    workstream: WS-CONSOLE
+    milestone: M1
+    priority: critical
+    labels: ["console", "automation", "docker"]
+
+  - title: "Console dashboard — web homepage (workspaces, stats, quick actions)"
+    workstream: WS-CONSOLE
+    milestone: M2
+    priority: high
+    labels: ["console", "dashboard", "frontend"]
+
+  - title: "Console dashboard — embedded panel inside code-server"
+    workstream: WS-CONSOLE
+    milestone: M2
+    priority: medium
+    labels: ["console", "dashboard", "code-server"]
+
+  - title: "Visual Studio autoload — WSL + mosgarage.console workspace picker"
+    workstream: WS-CONSOLE
+    milestone: M2
+    priority: high
+    labels: ["console", "visual-studio", "autoload"]
+
+  - title: "VS Code settings sync — Microsoft account + extensions marketplace"
+    workstream: WS-CONSOLE
+    milestone: M2
+    priority: medium
+    labels: ["console", "vscode", "microsoft"]
+
+  - title: "DevPod workspace template for mosgarage projects"
+    workstream: WS-CONSOLE
+    milestone: M2
+    priority: medium
+    labels: ["console", "devpod"]
+
+  - title: "Multi-arch build (amd64 + arm64) for console image"
+    workstream: WS-CONSOLE
+    milestone: M2
+    priority: high
+    labels: ["console", "docker", "ci-cd"]
+
+  # ── WS-STUDIO ───────────────────────────────────────────────────────────────
+  - title: "Ghost blog setup under studio.mosgarage.xyz"
+    workstream: WS-STUDIO
+    milestone: M3
+    priority: high
+    labels: ["studio", "blog", "ghost"]
+
+  - title: "Docusaurus docs site (/docs path)"
+    workstream: WS-STUDIO
+    milestone: M3
+    priority: high
+    labels: ["studio", "docs", "docusaurus"]
+
+  - title: "FlipStack: 3D interactive viewer component (React)"
+    workstream: WS-STUDIO
+    milestone: M3
+    priority: high
+    labels: ["studio", "flipstack", "frontend"]
+
+  - title: "FlipStack: standalone mosgarage/flipstack Docker image"
+    workstream: WS-STUDIO
+    milestone: M3
+    priority: high
+    labels: ["studio", "flipstack", "docker"]
+
+  - title: "FlipStack: embed script (<script> tag distribution)"
+    workstream: WS-STUDIO
+    milestone: M3
+    priority: medium
+    labels: ["studio", "flipstack", "embed"]
+
+  - title: "FlipStack: flipstack.mosgarage.xyz standalone domain"
+    workstream: WS-STUDIO
+    milestone: M3
+    priority: medium
+    labels: ["studio", "flipstack", "routing"]
+
+  - title: "Content builder — AMP-style structured authoring"
+    workstream: WS-STUDIO
+    milestone: M3
+    priority: medium
+    labels: ["studio", "builder"]
+
+  - title: "Content versioning — CalVer tags, auto-publish pipeline"
+    workstream: WS-STUDIO
+    milestone: M3
+    priority: medium
+    labels: ["studio", "versioning", "ci-cd"]
+
+  # ── WS-COMMUNITY ────────────────────────────────────────────────────────────
+  - title: "Community portal scaffold (Next.js)"
+    workstream: WS-COMMUNITY
+    milestone: M4
+    priority: high
+    labels: ["community", "frontend"]
+
+  - title: "Discord OAuth bridge + guild sync"
+    workstream: WS-COMMUNITY
+    milestone: M4
+    priority: high
+    labels: ["community", "discord"]
+
+  - title: "Developer profiles (linked to Entra ID + GitHub)"
+    workstream: WS-COMMUNITY
+    milestone: M4
+    priority: medium
+    labels: ["community", "profiles"]
+
+  - title: "Project showcases — link to mosgarage.console workspaces"
+    workstream: WS-COMMUNITY
+    milestone: M4
+    priority: medium
+    labels: ["community", "showcases"]
+
+  # ── WS-ACADEMY ──────────────────────────────────────────────────────────────
+  - title: "Academy portal scaffold (Next.js)"
+    workstream: WS-ACADEMY
+    milestone: M4
+    priority: high
+    labels: ["academy", "frontend"]
+
+  - title: "Course structure — modules, lessons, progress tracking"
+    workstream: WS-ACADEMY
+    milestone: M4
+    priority: high
+    labels: ["academy", "courses"]
+
+  - title: "GitHub OAuth sign-in for academy"
+    workstream: WS-ACADEMY
+    milestone: M4
+    priority: medium
+    labels: ["academy", "auth", "github"]
+
+  - title: "Academy ↔ FlipStack integration (course content as flipbooks)"
+    workstream: WS-ACADEMY
+    milestone: M4
+    priority: medium
+    labels: ["academy", "flipstack"]
+
+  # ── WS-ECAMPUS ──────────────────────────────────────────────────────────────
+  - title: "eCampus scaffold (Next.js, Entra ID auth required)"
+    workstream: WS-ECAMPUS
+    milestone: M5
+    priority: high
+    labels: ["ecampus", "frontend", "auth"]
+
+  - title: "Org/team management — enrol users, assign courses"
+    workstream: WS-ECAMPUS
+    milestone: M5
+    priority: high
+    labels: ["ecampus", "teams"]
+
+  - title: "eCampus ↔ Academy content sync"
+    workstream: WS-ECAMPUS
+    milestone: M5
+    priority: medium
+    labels: ["ecampus", "academy", "sync"]
+
+  # ── WS-AGENT ────────────────────────────────────────────────────────────────
+  - title: "Agent service scaffold — Fastify + LLM routing"
+    workstream: WS-AGENT
+    milestone: M5
+    priority: high
+    labels: ["agent", "ai"]
+
+  - title: "Agent: coding assistant inside console (code-server extension)"
+    workstream: WS-AGENT
+    milestone: M5
+    priority: high
+    labels: ["agent", "console", "ai"]
+
+  - title: "Agent: task automation — triggered by mosgaraged IPC bus"
+    workstream: WS-AGENT
+    milestone: M5
+    priority: medium
+    labels: ["agent", "automation", "mosgaraged"]
+
+  - title: "Agent: cross-service AI (studio, academy, community)"
+    workstream: WS-AGENT
+    milestone: M6
+    priority: medium
+    labels: ["agent", "ai"]
+
+  # ── WS-DEVENV ───────────────────────────────────────────────────────────────
+  - title: "WSL-first dev setup — ~/dev/localhost as source of truth"
+    workstream: WS-DEVENV
+    milestone: M1
+    priority: high
+    labels: ["dev-environment", "wsl"]
+
+  - title: "dev-watcher.sh — inotifywait auto-commit + push"
+    workstream: WS-DEVENV
+    milestone: M1
+    priority: high
+    labels: ["dev-environment", "wsl", "git"]
+
+  - title: "Git bare hub — post-receive fan-out to Windows, GitHub, VPS"
+    workstream: WS-DEVENV
+    milestone: M1
+    priority: high
+    labels: ["dev-environment", "git"]
+
+  - title: "VS Code WSL auto-connect settings"
+    workstream: WS-DEVENV
+    milestone: M1
+    priority: medium
+    labels: ["dev-environment", "vscode"]
+
+  - title: "Visual Studio 2022 — WSL + VPS SSH connection config"
+    workstream: WS-DEVENV
+    milestone: M2
+    priority: medium
+    labels: ["dev-environment", "visual-studio"]
+
+  - title: "OneDrive smart backup — D:\\dev\\localhost + IDE settings + SSH keys"
+    workstream: WS-DEVENV
+    milestone: M2
+    priority: medium
+    labels: ["dev-environment", "backup", "onedrive"]
+
+  # ── WS-WINDOWS ──────────────────────────────────────────────────────────────
+  - title: "Windows context menu — send highlighted text to Planner/ADO/GitHub"
+    workstream: WS-WINDOWS
+    milestone: M2
+    priority: medium
+    labels: ["windows-tooling", "planner", "context-menu"]
+
+  - title: "Context menu mini-popup — title, notes, due date, destination picker"
+    workstream: WS-WINDOWS
+    milestone: M2
+    priority: medium
+    labels: ["windows-tooling", "planner", "ui"]
+
+  # ── WS-CICD ─────────────────────────────────────────────────────────────────
+  - title: "GitHub Actions: multi-arch build matrix for all platform images"
+    workstream: WS-CICD
+    milestone: M1
+    priority: high
+    labels: ["ci-cd", "docker", "github-actions"]
+
+  - title: "GitHub Actions: deploy to Oracle VPS on version tag push"
+    workstream: WS-CICD
+    milestone: M1
+    priority: high
+    labels: ["ci-cd", "deploy", "vps"]
+
+  - title: "Semver + CalVer versioning scripts (version.sh)"
+    workstream: WS-CICD
+    milestone: M1
+    priority: medium
+    labels: ["ci-cd", "versioning"]
+
+  - title: "Azure DevOps pipeline mirror — mosgarage, officialmofabs, ecampuslearning"
+    workstream: WS-CICD
+    milestone: M3
+    priority: medium
+    labels: ["ci-cd", "azure-devops"]

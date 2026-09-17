@@ -1,0 +1,17 @@
+[Unit]
+Description=Mosgarage Node.js API Service
+After=network.target  # Start after the network is ready
+
+[Service]
+User=devops
+Group=devops
+WorkingDirectory=/home/devops/mosgarage-node
+ExecStart=/usr/bin/node /home/devops/mosgarage-node/app.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+StandardOutput=append:/var/log/mosgarage-node/out.log
+StandardError=append:/var/log/mosgarage-node/err.log
+
+[Install]
+WantedBy=multi-user.target

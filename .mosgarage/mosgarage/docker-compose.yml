@@ -1,0 +1,203 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  mosgarage · Platform Compose                                    ║
+# ║  .NET 8 control plane · PostgreSQL · Traefik · Unix socket IPC  ║
+# ║                                                                  ║
+# ║  Quick start:                                                    ║
+# ║    cp .env.example .env && docker compose up -d                  ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+name: mosgarage
+
+services:
+
+  # ── mosgarage control plane (.NET 8 ASP.NET Core) ──────────────
+  mosgarage:
+    image: docker.io/mosgarage/mosgarage:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: mosgarage
+    restart: unless-stopped
+    networks:
+      - mosgarage-net
+      - traefik-net
+    ports:
+      - "${MOSGARAGE_PORT:-7070}:7070"           # control plane HTTP
+      - "${MOSGARAGE_AGENT_PORT:-7071}:7071"     # agent gRPC/SignalR socket
+      - "${MOSGARAGE_SSH_PORT:-2222}:2222"          # SSH server (VS Code Remote-SSH / PuTTY / Terminal)
+    environment:
+      # ── Core ────────────────────────────────────────────────────
+      MOSGARAGE_ACCESS_URL:        "${MOSGARAGE_ACCESS_URL:-http://localhost:7070}"
+      MOSGARAGE_WILDCARD_URL:      "${MOSGARAGE_WILDCARD_URL:-}"
+      MOSGARAGE_ENV:               "${MOSGARAGE_ENV:-production}"
+
+      # ── Database ────────────────────────────────────────────────
+      MOSGARAGE_PG_CONNECTION:     "Host=database;Port=5432;Database=mosgarage;Username=mosgarage;Password=${POSTGRES_PASSWORD:-mosgarage};Pooling=true;MinPoolSize=2;MaxPoolSize=20;"
+
+      # ── Auth ────────────────────────────────────────────────────
+      MOSGARAGE_SECRET_KEY:        "${MOSGARAGE_SECRET_KEY:?Set MOSGARAGE_SECRET_KEY in .env}"
+      MOSGARAGE_ADMIN_EMAIL:       "${MOSGARAGE_ADMIN_EMAIL:-admin@mosgarage.local}"
+      MOSGARAGE_ADMIN_PASSWORD:    "${MOSGARAGE_ADMIN_PASSWORD:-changeme}"
+
+      # ── Provisioner ─────────────────────────────────────────────
+      MOSGARAGE_PROVISIONER:       "${MOSGARAGE_PROVISIONER:-docker}"  # docker | kubernetes
+      MOSGARAGE_WORKSPACE_NETWORK: "mosgarage-net"
+      MOSGARAGE_WORKSPACE_IMAGE:   "docker.io/mosgarage/workspace:latest"
+
+      # ── GitHub sync (inherited from previous config) ─────────────
+      GITHUB_USER:                 "${GITHUB_USER:-mosgaragedev}"
+      GITHUB_ORG:                  "${GITHUB_ORG:-mosgarage}"
+      GITHUB_REPO:                 "${GITHUB_REPO:-mosgaragedev}"
+      GITHUB_TOKEN:                "${GITHUB_TOKEN:-}"
+      GIT_BRANCH:                  "${GIT_BRANCH:-main}"
+      GIT_SYNC_INTERVAL:           "${GIT_SYNC_INTERVAL:-900}"
+
+      # ── Telemetry ────────────────────────────────────────────────
+      MOSGARAGE_TELEMETRY:         "${MOSGARAGE_TELEMETRY:-false}"
+
+      # ── SSH server ───────────────────────────────────────────────
+      MOSGARAGE_SSH_PUBLIC_KEY:         "${MOSGARAGE_SSH_PUBLIC_KEY:-}"
+      MOSGARAGE_SSH_PUBLIC_KEYS_B64:    "${MOSGARAGE_SSH_PUBLIC_KEYS_B64:-}"
+      MOSGARAGE_SSH_ALLOW_PASSWORD:     "${MOSGARAGE_SSH_ALLOW_PASSWORD:-false}"
+      MOSGARAGE_SSH_GENERATE_CLIENT_KEY: "${MOSGARAGE_SSH_GENERATE_CLIENT_KEY:-false}"
+
+      # ── Microsoft Entra ID (run deploy/entra-setup.sh to populate) ─
+      ENTRA_TENANT_ID:             "${ENTRA_TENANT_ID:-}"
+      ENTRA_CLIENT_ID:             "${ENTRA_CLIENT_ID:-}"
+      ENTRA_CLIENT_SECRET:         "${ENTRA_CLIENT_SECRET:-}"
+      ENTRA_AUDIENCE:              "${ENTRA_AUDIENCE:-}"
+      DOTNET_ENVIRONMENT:          Production
+      ASPNETCORE_URLS:             "http://+:7070;http://+:7071"
+
+    volumes:
+      # Docker socket — provisioner creates workspace containers
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Unix socket — IPC between control plane and workspace agents
+      # "mosgarage volume rm mosgarage_mosgarage_home" resets tunnel URL
+      - /var/run/mosgarage.sock:/var/run/mosgarage.sock
+
+      # Persistent home — stores tunnel identity, session state, templates
+      - mosgarage_home:/home/mosgarage
+
+      # Workspace templates
+      - ./templates:/home/mosgarage/templates:ro
+
+      # SSH config (sshd_config + banner + authorized_keys dir)
+      - ./config/ssh/sshd_config:/etc/ssh/sshd_config:ro
+      - ./config/ssh/mosgarage-banner.txt:/etc/ssh/mosgarage-banner.txt:ro
+
+      # Optional: mount your own authorized_keys file
+      # - ~/.ssh/authorized_keys:/home/mosgarage/.ssh/authorized_keys:ro
+
+    depends_on:
+      database:
+        condition: service_healthy
+      traefik:
+        condition: service_started
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7070/healthz"]
+      interval: 15s
+      timeout:  10s
+      retries:  5
+      start_period: 30s
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mosgarage.rule=Host(`${MOSGARAGE_DOMAIN:-mosgarage.localhost}`)"
+      - "traefik.http.routers.mosgarage.entrypoints=web"
+      - "traefik.http.services.mosgarage.loadbalancer.server.port=7070"
+
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  # ── PostgreSQL — primary datastore ─────────────────────────────
+  database:
+    image: postgres:16-alpine
+    container_name: mosgarage-db
+    restart: unless-stopped
+    networks:
+      - mosgarage-net
+    environment:
+      POSTGRES_USER:     mosgarage
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-mosgarage}"
+      POSTGRES_DB:       mosgarage
+      PGDATA:            /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./config/postgres-init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test:         ["CMD-SHELL", "pg_isready -U mosgarage -d mosgarage"]
+      interval:     5s
+      timeout:      5s
+      retries:      10
+      start_period: 10s
+    shm_size: 256mb
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Traefik — dynamic reverse proxy (workspace tunnel URLs) ────
+  traefik:
+    image: traefik:v3.0
+    container_name: mosgarage-proxy
+    restart: unless-stopped
+    networks:
+      - mosgarage-net
+      - traefik-net
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "8090:8080"   # Traefik dashboard (internal only in prod)
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.network=traefik-net"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--log.level=${TRAEFIK_LOG_LEVEL:-INFO}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/traefik/dynamic:/etc/traefik/dynamic:ro
+      - traefik_certs:/certs
+    healthcheck:
+      test:     ["CMD", "traefik", "healthcheck"]
+      interval: 10s
+      timeout:  5s
+      retries:  3
+
+  # ── mosgarage workspace image (built separately, used by provisioner)
+  # ── Un-comment to pre-build the workspace base image locally:
+  # workspace-builder:
+  #   image: docker.io/mosgarage/workspace:latest
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.workspace
+  #   profiles: ["build"]
+
+volumes:
+  mosgarage_home:
+    name: mosgarage_home
+    # Run: docker volume rm mosgarage_home
+    # to reset tunnel identity + dev URL (*.try.mosgarage.app)
+  postgres_data:
+    name: mosgarage_postgres_data
+  traefik_certs:
+    name: mosgarage_traefik_certs
+
+networks:
+  mosgarage-net:
+    name: mosgarage-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "172.28.0.0/16"
+  traefik-net:
+    name: traefik-net
+    driver: bridge

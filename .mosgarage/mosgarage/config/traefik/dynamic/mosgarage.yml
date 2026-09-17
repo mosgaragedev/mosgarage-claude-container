@@ -1,0 +1,41 @@
+# Traefik dynamic configuration — mosgarage wildcard routing
+# File: config/traefik/dynamic/mosgarage.yml
+# Traefik watches this directory and hot-reloads on changes.
+
+http:
+  middlewares:
+    # Strip /api prefix before forwarding
+    strip-api-prefix:
+      stripPrefix:
+        prefixes:
+          - "/api"
+
+    # Security headers for all workspace routes
+    workspace-headers:
+      headers:
+        customResponseHeaders:
+          X-Frame-Options: "SAMEORIGIN"
+          X-Content-Type-Options: "nosniff"
+          X-Mosgarage-Platform: "true"
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+
+    # Rate limit for workspace endpoints
+    workspace-rate-limit:
+      rateLimit:
+        burst: 100
+        average: 50
+
+  # Static routes (Docker label-based routes are auto-discovered)
+  routers:
+    mosgarage-health:
+      rule: "PathPrefix(`/healthz`)"
+      service: mosgarage-control
+      entryPoints:
+        - web
+
+  services:
+    mosgarage-control:
+      loadBalancer:
+        servers:
+          - url: "http://mosgarage:7070"

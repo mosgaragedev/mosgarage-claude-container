@@ -1,0 +1,32 @@
+{
+    "name": "mosgarage-claude-hq",
+    "version": "1.17.2",
+    "description": "Claude Code development standards — rules, hooks, agents, commands, and skills",
+    "type": "module",
+    "bin": {
+        "mosgarage-claude-hq": "bin/install.mjs"
+    },
+    "files": [
+        "bin/",
+        "rules/",
+        "docs/",
+        "commands/",
+        "agents/",
+        "skills/",
+        "hooks/"
+    ],
+    "keywords": [
+        "claude-code",
+        "plugin",
+        "mosgarage",
+        "cli",
+        "tdd",
+        "code-quality"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/mosgaragedev/mosgarage-claude-hq.git",
+        "directory": "packages/mosgarage-claude-hq"
+    }
+}

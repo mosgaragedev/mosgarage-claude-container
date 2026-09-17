@@ -103,3 +103,18 @@ Icon
 
 # Windows
 $RECYCLE.BIN/
+
+# Windows NTFS metadata (downloaded file markers)
+*:Zone.Identifier
+
+# Security: local-only secrets (never commit)
+# ubuntu-dev SSH keypair is injected at build time via BuildKit build secrets;
+# the GitHub MCP token is entered at runtime via the ${input:github_token} prompt.
+.devcontainer/ubuntu-dev/secrets/
+
+# Node install artifacts (reinstallable)
+workspaces/node_modules/
+
+# VS Code host-level files (belong to the host install, not the repo)
+argv.json
+webServerApiSettings.json
