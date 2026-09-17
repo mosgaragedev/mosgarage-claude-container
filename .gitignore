@@ -107,10 +107,10 @@ $RECYCLE.BIN/
 # Windows NTFS metadata (downloaded file markers)
 *:Zone.Identifier
 
-# Security: local-only files that contain real secrets (never commit)
-.devcontainer/ubuntu-dev/jammy/Dockerfile
-.devcontainer/ubuntu-dev/noble/Dockerfile
-claude_in_devcontainer/mcp.json
+# Security: local-only secrets (never commit)
+# ubuntu-dev SSH keypair is injected at build time via BuildKit build secrets;
+# the GitHub MCP token is entered at runtime via the ${input:github_token} prompt.
+.devcontainer/ubuntu-dev/secrets/
 
 # Node install artifacts (reinstallable)
 workspaces/node_modules/
