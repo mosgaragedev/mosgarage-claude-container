@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Environment variables and secrets
 .env
 .env.*
@@ -118,3 +119,15 @@ workspaces/node_modules/
 # VS Code host-level files (belong to the host install, not the repo)
 argv.json
 webServerApiSettings.json
+=======
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+>>>>>>> 90c6df2 (added github cli as features to devcontainer.json)

@@ -1,0 +1,1120 @@
+{
+  "generatedBy": "stack-graph",
+  "skills": {
+    "angular-conventions": {
+      "mcps": [
+        "context7"
+      ],
+      "plugins": []
+    },
+    "angular-material": {
+      "mcps": [],
+      "plugins": []
+    },
+    "angular-security": {
+      "mcps": [],
+      "plugins": []
+    },
+    "angular-styling": {
+      "mcps": [],
+      "plugins": []
+    },
+    "angular-testing": {
+      "mcps": [],
+      "plugins": []
+    },
+    "browser-extension": {
+      "mcps": [],
+      "plugins": []
+    },
+    "capacitor-release": {
+      "mcps": [],
+      "plugins": []
+    },
+    "create-ticket": {
+      "mcps": [],
+      "plugins": []
+    },
+    "csharp": {
+      "mcps": [
+        "context7"
+      ],
+      "plugins": []
+    },
+    "csharp-design-patterns": {
+      "mcps": [],
+      "plugins": []
+    },
+    "database-conventions": {
+      "mcps": [
+        "context7"
+      ],
+      "plugins": []
+    },
+    "database-security": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dev-log-convert": {
+      "mcps": [],
+      "plugins": []
+    },
+    "devops": {
+      "mcps": [
+        "context7"
+      ],
+      "plugins": []
+    },
+    "docs-as-code": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-architecture": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-architecture-tests": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-aspire": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-authentication": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-code-quality": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-console-apps": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-cryptography": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-data-access": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-diagnostics": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-grpc": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-hosted-services": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-messaging": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-migrate": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-minimal-api": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-mvc-controllers": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-openapi": {
+      "mcps": [
+        "context7"
+      ],
+      "plugins": []
+    },
+    "dotnet-performance": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-project-setup": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-realtime": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-security": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-source-generators": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-testing": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-web-backend": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-web-error-handling": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-windows-service": {
+      "mcps": [],
+      "plugins": []
+    },
+    "dotnet-winforms": {
+      "mcps": [
+        "context7"
+      ],
+      "plugins": []
+    },
+    "dotnet-wpf": {
+      "mcps": [
+        "context7"
+      ],
+      "plugins": []
+    },
+    "explain-code-tutor": {
+      "mcps": [],
+      "plugins": []
+    },
+    "ilspy-decompile": {
+      "mcps": [],
+      "plugins": []
+    },
+    "ionic": {
+      "mcps": [],
+      "plugins": []
+    },
+    "ionic-security": {
+      "mcps": [],
+      "plugins": []
+    },
+    "javascript": {
+      "mcps": [
+        "context7"
+      ],
+      "plugins": []
+    },
+    "markdown-style": {
+      "mcps": [],
+      "plugins": []
+    },
+    "npm": {
+      "mcps": [],
+      "plugins": []
+    },
+    "nx": {
+      "mcps": [],
+      "plugins": []
+    },
+    "plugin-authoring": {
+      "mcps": [],
+      "plugins": []
+    },
+    "postgres": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-agent-capabilities": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-architecture-analyzer": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-architecture-quality-loop": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-build-from-scratch": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-ci-failure-signatures": {
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "project-code-style-analyzer": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-commit-checkpoint": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-diagnose-failure": {
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "project-implementer": {
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "project-quality-loop": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-related-context": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-runtime-failure-signatures": {
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "project-solution-design": {
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "project-solve-cross-task": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-solve-task": {
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "project-stack-usage-analyzer": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-test-coverage-analyzer": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-test-coverage-loop": {
+      "mcps": [],
+      "plugins": []
+    },
+    "project-verify-code": {
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "project-verify-plan": {
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "project-version-upgrade": {
+      "mcps": [],
+      "plugins": []
+    },
+    "sqlite": {
+      "mcps": [],
+      "plugins": []
+    },
+    "ts-js-testing": {
+      "mcps": [],
+      "plugins": []
+    },
+    "typescript": {
+      "mcps": [],
+      "plugins": []
+    },
+    "webpack": {
+      "mcps": [],
+      "plugins": []
+    }
+  },
+  "agents": {
+    "angular-test-resolver": {
+      "skills": [],
+      "skillsSource": "body",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "architecture-analyzer": {
+      "skills": [],
+      "skillsSource": "none",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "aspnet-implementer": {
+      "skills": [
+        "csharp",
+        "dotnet-data-access",
+        "dotnet-testing",
+        "dotnet-web-backend",
+        "dotnet-web-error-handling"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "aspnet-solution-designer": {
+      "skills": [
+        "csharp-design-patterns",
+        "dotnet-testing",
+        "dotnet-web-backend",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "aspnet-verifier": {
+      "skills": [
+        "csharp",
+        "dotnet-code-quality",
+        "dotnet-data-access",
+        "dotnet-testing",
+        "dotnet-web-backend"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "browser-extension-implementer": {
+      "skills": [
+        "browser-extension",
+        "javascript",
+        "typescript"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "browser-extension-solution-designer": {
+      "skills": [
+        "browser-extension",
+        "project-solution-design",
+        "ts-js-testing"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "browser-extension-verifier": {
+      "skills": [
+        "browser-extension",
+        "javascript",
+        "ts-js-testing",
+        "typescript"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "ci-failure-diagnoser": {
+      "skills": [
+        "project-ci-failure-signatures"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "code-style-analyzer": {
+      "skills": [],
+      "skillsSource": "none",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "console-implementer": {
+      "skills": [
+        "csharp",
+        "dotnet-hosted-services",
+        "dotnet-testing"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "console-solution-designer": {
+      "skills": [
+        "csharp-design-patterns",
+        "dotnet-hosted-services",
+        "dotnet-testing",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "console-verifier": {
+      "skills": [
+        "csharp",
+        "dotnet-code-quality",
+        "dotnet-hosted-services",
+        "dotnet-testing"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "data-implementer": {
+      "skills": [
+        "csharp",
+        "database-conventions",
+        "dotnet-data-access",
+        "dotnet-testing"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "data-solution-designer": {
+      "skills": [
+        "database-conventions",
+        "dotnet-migrate",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "data-verifier": {
+      "skills": [
+        "database-conventions",
+        "dotnet-migrate",
+        "dotnet-testing"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "devops-implementer": {
+      "skills": [
+        "devops"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "devops-solution-designer": {
+      "skills": [
+        "devops",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "devops-verifier": {
+      "skills": [
+        "devops"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "dotnet-build-error-resolver": {
+      "skills": [],
+      "skillsSource": "body",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "dotnet-test-failure-resolver": {
+      "skills": [],
+      "skillsSource": "body",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "evidence-gatherer": {
+      "skills": [],
+      "skillsSource": "none",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "integration-reviewer": {
+      "skills": [],
+      "skillsSource": "body",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "ionic-angular-implementer": {
+      "skills": [
+        "angular-conventions",
+        "ionic",
+        "javascript",
+        "typescript"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "ionic-angular-solution-designer": {
+      "skills": [
+        "angular-conventions",
+        "angular-testing",
+        "ionic",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "ionic-angular-verifier": {
+      "skills": [
+        "angular-conventions",
+        "angular-testing",
+        "ionic",
+        "javascript",
+        "typescript"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "ng-build-error-resolver": {
+      "skills": [],
+      "skillsSource": "body",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "related-project-analyzer": {
+      "skills": [],
+      "skillsSource": "none",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "runtime-failure-diagnoser": {
+      "skills": [
+        "project-runtime-failure-signatures"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "security-auditor": {
+      "skills": [],
+      "skillsSource": "body",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "test-coverage-analyzer": {
+      "skills": [],
+      "skillsSource": "none",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "web-angular-implementer": {
+      "skills": [
+        "angular-conventions",
+        "javascript",
+        "typescript"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "web-angular-solution-designer": {
+      "skills": [
+        "angular-conventions",
+        "angular-testing",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "web-angular-verifier": {
+      "skills": [
+        "angular-conventions",
+        "angular-testing",
+        "javascript",
+        "typescript"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "windows-service-implementer": {
+      "skills": [
+        "csharp",
+        "dotnet-hosted-services",
+        "dotnet-testing",
+        "dotnet-windows-service"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "windows-service-solution-designer": {
+      "skills": [
+        "csharp-design-patterns",
+        "dotnet-hosted-services",
+        "dotnet-testing",
+        "dotnet-windows-service",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "windows-service-verifier": {
+      "skills": [
+        "csharp",
+        "dotnet-code-quality",
+        "dotnet-hosted-services",
+        "dotnet-testing",
+        "dotnet-windows-service"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "winforms-implementer": {
+      "skills": [
+        "csharp",
+        "dotnet-testing",
+        "dotnet-winforms"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "winforms-solution-designer": {
+      "skills": [
+        "csharp-design-patterns",
+        "dotnet-testing",
+        "dotnet-winforms",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "winforms-verifier": {
+      "skills": [
+        "csharp",
+        "dotnet-code-quality",
+        "dotnet-testing",
+        "dotnet-winforms"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    },
+    "wpf-implementer": {
+      "skills": [
+        "csharp",
+        "dotnet-testing",
+        "dotnet-wpf"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "wpf-solution-designer": {
+      "skills": [
+        "csharp-design-patterns",
+        "dotnet-testing",
+        "dotnet-wpf",
+        "project-solution-design"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": []
+    },
+    "wpf-verifier": {
+      "skills": [
+        "csharp",
+        "dotnet-code-quality",
+        "dotnet-testing",
+        "dotnet-wpf"
+      ],
+      "skillsSource": "frontmatter",
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ]
+    }
+  },
+  "rules": {
+    "angular-conventions": {
+      "skills": [
+        "angular-conventions",
+        "typescript"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/angular.json",
+        "**/*.component.ts",
+        "**/*.component.html",
+        "**/*.service.ts",
+        "**/*.directive.ts",
+        "**/*.pipe.ts",
+        "**/*.guard.ts",
+        "**/*.resolver.ts",
+        "**/*.module.ts",
+        "**/*.routes.ts",
+        "**/src/app/**/*.ts",
+        "**/src/app/**/*.html",
+        "**/src/lib/**/*.ts",
+        "**/src/lib/**/*.html"
+      ]
+    },
+    "angular-repair-agents": {
+      "skills": [
+        "project-solve-cross-task"
+      ],
+      "agents": [
+        "angular-test-resolver",
+        "ng-build-error-resolver"
+      ],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/angular.json",
+        "**/*.component.ts",
+        "**/*.component.html",
+        "**/*.spec.ts",
+        "**/*.component.scss",
+        "**/src/styles.scss",
+        "**/src/theme/**/*.scss",
+        "**/src/app/**/*.ts",
+        "**/src/app/**/*.html",
+        "**/src/app/**/*.scss",
+        "**/src/lib/**/*.ts",
+        "**/src/lib/**/*.html",
+        "**/src/lib/**/*.scss"
+      ]
+    },
+    "angular-styling-conventions": {
+      "skills": [
+        "angular-styling"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.component.scss",
+        "**/*.component.css",
+        "**/src/styles.scss",
+        "**/src/styles.css",
+        "**/src/global.scss",
+        "**/src/theme/**/*.scss",
+        "**/src/app/**/*.scss",
+        "**/src/app/**/*.css",
+        "**/src/lib/**/*.scss",
+        "**/src/lib/**/*.css"
+      ]
+    },
+    "baseline-docs-root": {
+      "skills": [],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": []
+    },
+    "baseline-git": {
+      "skills": [
+        "project-commit-checkpoint"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": []
+    },
+    "baseline-interaction": {
+      "skills": [],
+      "agents": [],
+      "mcps": [],
+      "plugins": [
+        "superpowers"
+      ],
+      "paths": []
+    },
+    "baseline-navigation": {
+      "skills": [],
+      "agents": [],
+      "mcps": [
+        "serena"
+      ],
+      "plugins": [],
+      "paths": []
+    },
+    "baseline-quality-gates": {
+      "skills": [],
+      "agents": [],
+      "mcps": [
+        "context7"
+      ],
+      "plugins": [
+        "superpowers"
+      ],
+      "paths": []
+    },
+    "baseline-security": {
+      "skills": [
+        "project-commit-checkpoint"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": []
+    },
+    "csharp-conventions": {
+      "skills": [
+        "csharp",
+        "dotnet-testing"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.cs"
+      ]
+    },
+    "devops-conventions": {
+      "skills": [
+        "devops"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/Dockerfile",
+        "**/Dockerfile.*",
+        "**/*.Dockerfile",
+        "**/docker-compose*.yml",
+        "**/docker-compose*.yaml",
+        "**/compose*.yml",
+        "**/compose*.yaml",
+        "**/.github/workflows/*.yml",
+        "**/.github/workflows/*.yaml",
+        "**/deploy*.sh",
+        "**/deploy*.ps1"
+      ]
+    },
+    "dotnet-repair-agents": {
+      "skills": [
+        "project-solve-cross-task"
+      ],
+      "agents": [
+        "dotnet-build-error-resolver",
+        "dotnet-test-failure-resolver"
+      ],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.cs",
+        "**/*.csproj",
+        "**/*.sln",
+        "**/*.slnx",
+        "**/*.xaml",
+        "**/Directory.Build.props",
+        "**/Directory.Packages.props",
+        "**/*.targets",
+        "**/nuget.config",
+        "**/NuGet.Config"
+      ]
+    },
+    "javascript-conventions": {
+      "skills": [
+        "javascript"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.js",
+        "**/*.jsx",
+        "**/*.mjs",
+        "**/*.cjs"
+      ]
+    },
+    "markdown-docs": {
+      "skills": [
+        "docs-as-code",
+        "markdown-style"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.md"
+      ]
+    },
+    "sql-conventions": {
+      "skills": [
+        "database-conventions"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.sql"
+      ]
+    },
+    "typescript-conventions": {
+      "skills": [
+        "javascript",
+        "typescript"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.ts",
+        "**/*.tsx"
+      ]
+    },
+    "winforms-conventions": {
+      "skills": [
+        "csharp",
+        "dotnet-winforms"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.Designer.cs",
+        "**/*Form.cs",
+        "**/*Form.*.cs"
+      ]
+    },
+    "wpf-conventions": {
+      "skills": [
+        "csharp",
+        "dotnet-wpf"
+      ],
+      "agents": [],
+      "mcps": [],
+      "plugins": [],
+      "paths": [
+        "**/*.xaml"
+      ]
+    }
+  },
+  "catalog": {
+    "mcps": [
+      "angular-cli",
+      "appium-mcp",
+      "chrome-devtools",
+      "context7",
+      "memory",
+      "playwright",
+      "sentry",
+      "serena"
+    ],
+    "plugins": [
+      "claude-hud",
+      "claude-md-management",
+      "csharp-lsp",
+      "security-guidance",
+      "superpowers",
+      "typescript-lsp"
+    ],
+    "hooks": [
+      "guard-answer-length",
+      "guard-catastrophic-rm",
+      "guard-cross-project-write",
+      "guard-fresh-session-start",
+      "guard-protected-force-push",
+      "guard-read-whole-file",
+      "guard-secret-value",
+      "guard-stop-contract",
+      "guard-unapproved-dispatch",
+      "guard-ungated-commit",
+      "instrument-tool-usage"
+    ]
+  }
+}

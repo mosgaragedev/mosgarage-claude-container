@@ -1,0 +1,344 @@
+{
+ "always": {
+  "agents": [
+   "ci-failure-diagnoser",
+   "architecture-analyzer",
+   "code-style-analyzer",
+   "evidence-gatherer",
+   "integration-reviewer",
+   "runtime-failure-diagnoser",
+   "security-auditor",
+   "test-coverage-analyzer"
+  ],
+  "rules": [
+   "baseline-docs-root",
+   "baseline-git",
+   "baseline-interaction",
+   "baseline-navigation",
+   "baseline-quality-gates",
+   "baseline-security",
+   "markdown-docs"
+  ],
+  "mcps": [
+   "serena",
+   "context7"
+  ],
+  "plugins": [
+   "superpowers",
+   "security-guidance",
+   "claude-hud"
+  ],
+  "hooks": [
+   "guard-protected-force-push",
+   "guard-catastrophic-rm",
+   "guard-read-whole-file",
+   "guard-secret-value",
+   "guard-unapproved-dispatch",
+   "guard-ungated-commit",
+   "guard-stop-contract",
+   "guard-fresh-session-start",
+   "guard-cross-project-write",
+   "guard-answer-length",
+   "instrument-tool-usage"
+  ],
+  "skills": [
+   "project-agent-capabilities",
+   "project-architecture-analyzer",
+   "project-architecture-quality-loop",
+   "project-code-style-analyzer",
+   "project-commit-checkpoint",
+   "project-diagnose-failure",
+   "project-implementer",
+   "project-quality-loop",
+   "project-solution-design",
+   "project-solve-cross-task",
+   "project-solve-task",
+   "project-test-coverage-analyzer",
+   "project-test-coverage-loop",
+   "project-verify-code",
+   "project-verify-plan",
+   "project-version-upgrade"
+  ]
+ },
+ "general": {
+  "skills": [
+   "dotnet-hosted-services",
+   "dotnet-data-access",
+   "project-related-context",
+   "project-stack-usage-analyzer",
+   "plugin-authoring"
+  ],
+  "agents": [
+   "related-project-analyzer"
+  ],
+  "mcps": [
+   "memory"
+  ],
+  "plugins": [
+   "claude-md-management"
+  ]
+ },
+ "stacks": {
+  "aspnet": {
+   "agents": [
+    "aspnet-solution-designer",
+    "aspnet-implementer",
+    "aspnet-verifier",
+    "dotnet-build-error-resolver",
+    "dotnet-test-failure-resolver"
+   ],
+   "skills": [
+    "dotnet",
+    "csharp-design-patterns",
+    "dotnet-architecture",
+    "dotnet-diagnostics",
+    "dotnet-migrate",
+    "dotnet-performance",
+    "dotnet-security",
+    "dotnet-web-error-handling",
+    "ilspy-decompile",
+    "dotnet-project-setup"
+   ],
+   "rules": [
+    "csharp-conventions",
+    "dotnet-repair-agents"
+   ],
+   "plugins": [
+    "csharp-lsp"
+   ]
+  },
+  "web-angular": {
+   "agents": [
+    "web-angular-solution-designer",
+    "web-angular-implementer",
+    "web-angular-verifier",
+    "ng-build-error-resolver",
+    "angular-test-resolver"
+   ],
+   "rules": [
+    "typescript-conventions",
+    "javascript-conventions",
+    "angular-conventions",
+    "angular-styling-conventions",
+    "angular-repair-agents"
+   ],
+   "plugins": [
+    "typescript-lsp"
+   ],
+   "mcps": [
+    "angular-cli",
+    "playwright"
+   ],
+   "skills": [
+    "angular-security",
+    "angular-testing"
+   ]
+  },
+  "wpf": {
+   "agents": [
+    "wpf-solution-designer",
+    "wpf-implementer",
+    "wpf-verifier",
+    "dotnet-build-error-resolver",
+    "dotnet-test-failure-resolver"
+   ],
+   "skills": [
+    "dotnet",
+    "csharp-design-patterns",
+    "dotnet-architecture",
+    "dotnet-diagnostics",
+    "dotnet-migrate",
+    "dotnet-performance",
+    "dotnet-security",
+    "ilspy-decompile",
+    "dotnet-project-setup"
+   ],
+   "rules": [
+    "csharp-conventions",
+    "wpf-conventions",
+    "dotnet-repair-agents"
+   ],
+   "plugins": [
+    "csharp-lsp"
+   ]
+  },
+  "winforms": {
+   "agents": [
+    "winforms-solution-designer",
+    "winforms-implementer",
+    "winforms-verifier",
+    "dotnet-build-error-resolver",
+    "dotnet-test-failure-resolver"
+   ],
+   "skills": [
+    "dotnet",
+    "csharp-design-patterns",
+    "dotnet-architecture",
+    "dotnet-diagnostics",
+    "dotnet-migrate",
+    "dotnet-performance",
+    "dotnet-security",
+    "ilspy-decompile",
+    "dotnet-project-setup"
+   ],
+   "rules": [
+    "csharp-conventions",
+    "winforms-conventions",
+    "dotnet-repair-agents"
+   ],
+   "plugins": [
+    "csharp-lsp"
+   ]
+  },
+  "console": {
+   "agents": [
+    "console-solution-designer",
+    "console-implementer",
+    "console-verifier",
+    "dotnet-build-error-resolver",
+    "dotnet-test-failure-resolver"
+   ],
+   "skills": [
+    "dotnet",
+    "csharp-design-patterns",
+    "dotnet-architecture",
+    "dotnet-diagnostics",
+    "dotnet-migrate",
+    "dotnet-performance",
+    "dotnet-security",
+    "ilspy-decompile",
+    "dotnet-project-setup"
+   ],
+   "rules": [
+    "csharp-conventions",
+    "dotnet-repair-agents"
+   ],
+   "plugins": [
+    "csharp-lsp"
+   ]
+  },
+  "windows-service": {
+   "agents": [
+    "windows-service-solution-designer",
+    "windows-service-implementer",
+    "windows-service-verifier",
+    "dotnet-build-error-resolver",
+    "dotnet-test-failure-resolver"
+   ],
+   "skills": [
+    "dotnet",
+    "csharp-design-patterns",
+    "dotnet-architecture",
+    "dotnet-diagnostics",
+    "dotnet-migrate",
+    "dotnet-performance",
+    "dotnet-security",
+    "ilspy-decompile",
+    "dotnet-project-setup"
+   ],
+   "rules": [
+    "csharp-conventions",
+    "dotnet-repair-agents"
+   ],
+   "plugins": [
+    "csharp-lsp"
+   ]
+  },
+  "ionic-angular": {
+   "agents": [
+    "ionic-angular-solution-designer",
+    "ionic-angular-implementer",
+    "ionic-angular-verifier",
+    "ng-build-error-resolver",
+    "angular-test-resolver"
+   ],
+   "skills": [
+    "angular-security",
+    "angular-testing",
+    "capacitor-release",
+    "ionic-security"
+   ],
+   "rules": [
+    "typescript-conventions",
+    "javascript-conventions",
+    "angular-conventions",
+    "angular-styling-conventions",
+    "angular-repair-agents"
+   ],
+   "plugins": [
+    "typescript-lsp"
+   ],
+   "mcps": [
+    "angular-cli",
+    "playwright"
+   ]
+  },
+  "data": {
+   "agents": [
+    "data-solution-designer",
+    "data-implementer",
+    "data-verifier"
+   ],
+   "rules": [
+    "sql-conventions"
+   ],
+   "skills": [
+    "database-security"
+   ]
+  },
+  "devops": {
+   "agents": [
+    "devops-solution-designer",
+    "devops-implementer",
+    "devops-verifier"
+   ],
+   "rules": [
+    "devops-conventions"
+   ]
+  },
+  "browser-extension": {
+   "agents": [
+    "browser-extension-solution-designer",
+    "browser-extension-implementer",
+    "browser-extension-verifier"
+   ],
+   "skills": [
+    "ts-js-testing"
+   ],
+   "rules": [
+    "typescript-conventions",
+    "javascript-conventions"
+   ],
+   "plugins": [
+    "typescript-lsp"
+   ],
+   "mcps": [
+    "playwright"
+   ]
+  },
+  "typescript": {
+   "skills": [
+    "ts-js-testing"
+   ],
+   "rules": [
+    "typescript-conventions",
+    "javascript-conventions"
+   ],
+   "plugins": [
+    "typescript-lsp"
+   ]
+  },
+  "javascript": {
+   "skills": [
+    "javascript",
+    "ts-js-testing"
+   ],
+   "rules": [
+    "javascript-conventions"
+   ],
+   "plugins": [
+    "typescript-lsp"
+   ]
+  }
+ }
+}

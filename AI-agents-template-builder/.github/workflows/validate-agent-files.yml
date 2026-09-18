@@ -1,0 +1,80 @@
+name: Validate agent files
+
+# Runs on every push to ensure CLAUDE.md and AGENTS.md stay in sync
+# and that all spec files referenced in CLAUDE.md actually exist.
+
+on:
+  push:
+    paths:
+      - 'CLAUDE.md'
+      - 'AGENTS.md'
+      - 'docs/specs/**'
+      - 'SECURITY.md'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check CLAUDE.md exists and is non-empty
+        run: |
+          if [ ! -f CLAUDE.md ] || [ ! -s CLAUDE.md ]; then
+            echo "❌ CLAUDE.md missing or empty"
+            exit 1
+          fi
+          echo "✓ CLAUDE.md present"
+
+      - name: Check AGENTS.md exists and is non-empty
+        run: |
+          if [ ! -f AGENTS.md ] || [ ! -s AGENTS.md ]; then
+            echo "❌ AGENTS.md missing or empty"
+            exit 1
+          fi
+          echo "✓ AGENTS.md present"
+
+      - name: Check no unfilled template placeholders remain
+        run: |
+          if grep -rn '{{[A-Z_]*}}' CLAUDE.md AGENTS.md 2>/dev/null; then
+            echo "❌ Unfilled placeholders found — run scripts/init-project.sh"
+            exit 1
+          fi
+          echo "✓ No unfilled placeholders"
+
+      - name: Check all spec files referenced in CLAUDE.md exist
+        run: |
+          MISSING=0
+          while IFS= read -r specpath; do
+            if [ ! -f "$specpath" ]; then
+              echo "❌ Referenced spec not found: $specpath"
+              MISSING=$((MISSING + 1))
+            fi
+          done < <(grep -oP 'docs/specs/[a-z-]+\.spec\.md' CLAUDE.md || true)
+          if [ $MISSING -gt 0 ]; then
+            echo "Run: ./scripts/new-module.sh to create missing specs"
+            exit 1
+          fi
+          echo "✓ All spec files present"
+
+      - name: Check SECURITY.md present
+        run: |
+          if [ ! -f SECURITY.md ]; then
+            echo "❌ SECURITY.md missing — copy from agent-template"
+            exit 1
+          fi
+          echo "✓ SECURITY.md present"
+
+      - name: Check .env.example present
+        run: |
+          if [ ! -f .env.example ]; then
+            echo "❌ .env.example missing"
+            exit 1
+          fi
+          if [ -f .env ]; then
+            echo "❌ .env file committed — remove it immediately and rotate any secrets"
+            exit 1
+          fi
+          echo "✓ .env.example present, .env not committed"
+
+      - name: Summary
+        run: echo "✅ All agent files valid"

@@ -1,0 +1,348 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const ROOT = path.join(__dirname, '..');
+const PLUGIN_DIR = path.join(ROOT, 'setup-plugin');
+
+test('marketplace.json is valid and points at the setup-plugin subdir', () => {
+    const mp = JSON.parse(fs.readFileSync(path.join(ROOT, '.claude-plugin', 'marketplace.json'), 'utf8'));
+    assert.strictEqual(mp.name, 'claude-stack');
+    assert.ok(Array.isArray(mp.plugins) && mp.plugins.length === 1);
+    const p = mp.plugins[0];
+    assert.strictEqual(p.name, 'claude-stack');
+    assert.strictEqual(p.source, './setup-plugin');
+    assert.ok(typeof p.description === 'string' && p.description.trim() !== '');
+});
+
+test('plugin.json is valid, the five commands are listed, and the router skill exists', () => {
+    const pj = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, '.claude-plugin', 'plugin.json'), 'utf8'));
+    assert.strictEqual(pj.name, 'claude-stack');
+    assert.ok(typeof pj.version === 'string' && pj.version.trim() !== '');
+    assert.ok(typeof pj.description === 'string' && pj.description.trim() !== '');
+    // Plugin COMMANDS display namespaced-only (/claude-stack:setup); plugin SKILLS display bare -
+    // so the workers must be commands and the router a skill named exactly like the plugin
+    // (bare /claude-stack, no /claude-stack:claude-stack stutter). Empirically proven layout.
+    assert.deepStrictEqual(pj.commands, ['./commands/setup.md', './commands/update.md', './commands/configure.md', './commands/validate.md', './commands/status.md']);
+    for (const name of ['setup', 'update', 'configure', 'validate', 'status'])
+    {
+        assert.ok(fs.existsSync(path.join(PLUGIN_DIR, 'commands', `${name}.md`)), `the /claude-stack:${name} command exists`);
+    }
+    assert.ok(fs.existsSync(path.join(PLUGIN_DIR, 'skills', 'claude-stack', 'SKILL.md')), 'the /claude-stack router skill exists');
+    assert.ok(!fs.existsSync(path.join(PLUGIN_DIR, 'commands', 'claude-stack.md')), 'no router COMMAND - a command named like the plugin displays as the /claude-stack:claude-stack stutter');
+});
+
+test('no tracked plugin file leaks an email address', () => {
+    for (const rel of ['.claude-plugin/marketplace.json', 'setup-plugin/.claude-plugin/plugin.json'])
+    {
+        const text = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+        assert.ok(!/@[a-z0-9.-]+\.[a-z]{2,}/i.test(text.replace(/@claude-stack|@main/g, '')), `${rel} must not contain an email`);
+    }
+});
+
+const { computeClosure } = require('./stack-select.js');
+const graph = require('../meta/stack-graph.json');
+
+const RECS = path.join(ROOT, 'meta', 'recommendations.json');
+
+test('every recommendation name resolves in the dependency graph', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    const agentKeys = new Set(Object.keys(graph.agents));
+    const ruleKeys = new Set(Object.keys(graph.rules));
+    const skillKeys = new Set(Object.keys(graph.skills));
+    const seeds = [recs.always, recs.general, ...Object.values(recs.stacks)];
+    for (const seed of seeds)
+    {
+        for (const a of seed.agents || []) assert.ok(agentKeys.has(a), `recommendation agent '${a}' not in graph`);
+        for (const r of seed.rules || []) assert.ok(ruleKeys.has(r), `recommendation rule '${r}' not in graph`);
+        for (const s of seed.skills || []) assert.ok(skillKeys.has(s), `recommendation skill '${s}' not in graph`);
+        const pluginCatalog = new Set(graph.catalog.plugins);
+        for (const p of seed.plugins || []) assert.ok(pluginCatalog.has(p), `recommendation plugin '${p}' not in catalog`);
+        const mcpCatalog = new Set(graph.catalog.mcps);
+        for (const m of seed.mcps || []) assert.ok(mcpCatalog.has(m), `recommendation mcp '${m}' not in catalog`);
+        const hookCatalog = new Set(graph.catalog.hooks);
+        for (const h of seed.hooks || []) assert.ok(hookCatalog.has(h), `recommendation hook '${h}' not in catalog`);
+    }
+});
+
+test('the aspnet seed installs the csharp LSP plugin', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    const closed = computeClosure(graph, { agents: recs.stacks.aspnet.agents, rules: recs.stacks.aspnet.rules, plugins: recs.stacks.aspnet.plugins });
+    assert.ok(closed.plugins.includes('csharp-lsp'), 'aspnet installs csharp-lsp');
+});
+
+test('the aspnet seed closes to its .NET vertical', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    const seed = recs.stacks['aspnet'];
+    assert.ok(seed, 'an aspnet stack recommendation exists');
+    const closed = computeClosure(graph, { agents: [...(recs.always.agents || []), ...(seed.agents || [])], rules: [...(recs.always.rules || []), ...(seed.rules || [])] });
+    assert.ok(closed.skills.includes('csharp'), 'aspnet closure pulls csharp');
+    assert.ok(closed.skills.includes('dotnet-web-backend'), 'aspnet closure pulls the web hub');
+});
+
+test('the always block seeds the cross-cutting agents and baseline rules', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    for (const r of ['baseline-interaction', 'baseline-security', 'baseline-git'])
+    {
+        assert.ok((recs.always.rules || []).includes(r), `always seeds ${r}`);
+    }
+    // the entry-point orchestrator installs everywhere - previously only the four
+    // repair-rule stacks pulled it, so a mobile/data/devops-only install shipped without
+    // the skill that drives its own trio.
+    assert.ok((recs.always.skills || []).includes('project-solve-cross-task'), 'always seeds the orchestrator');
+});
+
+// A capture skill fans out its own read-only seat, and the graph cannot express that edge
+// (skills carry only mcp/plugin edges by design) - so the pairing lives in the seeds and nothing
+// but this test keeps it honest. A seeded capture skill without its seat installs a flow that
+// has no one to dispatch (how code-style-analyzer went unseeded).
+test('every always-seeded capture skill seeds the seat it fans out', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    const PAIRS = {
+        'project-architecture-analyzer': 'architecture-analyzer',
+        'project-code-style-analyzer': 'code-style-analyzer',
+        'project-test-coverage-analyzer': 'test-coverage-analyzer',
+        'project-related-context': 'related-project-analyzer',
+    };
+    for (const [skill, seat] of Object.entries(PAIRS))
+    {
+        for (const bucket of ['always', 'general'])
+        {
+            if (!((recs[bucket] || {}).skills || []).includes(skill)) continue;
+            assert.ok(((recs[bucket] || {}).agents || []).includes(seat), `${bucket} seeds ${skill} without ${seat}`);
+        }
+    }
+});
+
+// Sibling repos are a property of the PROJECT, not of a stack or of the baseline - a standalone
+// repo has none, and no manifest signal can prove otherwise. So the related-context pair is
+// opt-in: it sits in `general` (addable in any walk, never flagged redundant, never reported
+// missing) instead of `always`, which would install it for everyone and have validate re-add it.
+test('the related-context capture is optional, never an always-baseline seed', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    assert.ok(!(recs.always.skills || []).includes('project-related-context'), 'always must not seed the skill');
+    assert.ok(!(recs.always.agents || []).includes('related-project-analyzer'), 'always must not seed the seat');
+    assert.ok((recs.general.skills || []).includes('project-related-context'), 'general carries the skill');
+    assert.ok((recs.general.agents || []).includes('related-project-analyzer'), 'general carries the seat');
+    for (const sel of Object.values(recs.stacks))
+    {
+        assert.ok(!(sel.skills || []).includes('project-related-context'), 'no stack seeds the skill');
+        assert.ok(!(sel.agents || []).includes('related-project-analyzer'), 'no stack seeds the seat');
+    }
+});
+
+// An always-baseline artifact installs into EVERY project, so it must be stack-neutral. A browser
+// driver in a WinForms install is the same defect as an Angular skill there: the need has to be
+// proven (a stack whose surface always has a browser, or the project's own manifests) - it is
+// never assumed. playwright sat in `always.mcps` and shipped to every console/WPF/data install.
+// MEASURED (a real 0.2.47 setup run on a WPF/WinForms project): every layer table was rendered
+// into `$TMP/table.txt` by a redirect and then never shown - the redirect empties the tool result,
+// so pasting it needed a read-back step the prescribed command never contained, and all six layer
+// questions were asked with no catalog on screen. The table must come back in the tool result.
+test('the layer table is never redirected to a file - the tool result is what gets pasted', () => {
+    for (const name of ['setup', 'configure'])
+    {
+        const body = fs.readFileSync(path.join(PLUGIN_DIR, 'commands', `${name}.md`), 'utf8');
+        const tableCmds = body.split('\n').filter(l => l.includes('--table <layer>'));
+        assert.ok(tableCmds.length, `${name} prescribes the table command`);
+        for (const line of tableCmds)
+        {
+            assert.ok(!/--table <layer>[^`]*>\s*"?\$TMP/.test(line), `${name} must not redirect the table into a file: ${line.trim().slice(0, 120)}`);
+        }
+        assert.match(body, /total: N <layer>/, `${name} carries the footer self-check`);
+    }
+});
+
+// A plugin's own defaults are not this stack's recommendation, and the stack must not force one:
+// the ASK belongs to the plugins layer's own turn (that is where the user is deciding about
+// plugins), the APPLY to the install step - the plugin has to be on disk first. Same shape as the
+// environment choices, asked up front and merged once the installer has run. Both halves are found
+// by NAME and tied together by the apply subsection's own number: the ladders renumber whenever a
+// step is inserted, and what this pins is where the two halves sit, not what they are numbered.
+test('both walks ask the plugin-settings question in the plugins layer and apply it after install', () => {
+    for (const name of ['setup', 'configure'])
+    {
+        const body = fs.readFileSync(path.join(PLUGIN_DIR, 'commands', `${name}.md`), 'utf8');
+        const pluginsAt = body.search(/^## \d+\. Plugins$/m);
+        assert.ok(pluginsAt >= 0, `${name} has a numbered plugins layer`);
+        const rest = body.slice(pluginsAt + 1);
+        const nextHeading = rest.search(/^## /m);
+        const layer = nextHeading >= 0 ? rest.slice(0, nextHeading) : rest;
+        assert.match(layer, /Plugin settings - part of this layer's turn/, `${name} asks inside the plugins layer`);
+        assert.match(layer, /plugin-settings\.js/, `${name} reports with the tool, never a hand edit`);
+        assert.match(layer, /meta\/plugin-settings\.json/, `${name} reads the snapshot catalog`);
+        assert.match(layer, /Apply recommended/, `${name} offers apply`);
+        assert.match(layer, /Apply and replace differing/, `${name} offers replace`);
+        assert.match(layer, /\*\*Skip\*\*/, `${name} offers skip`);
+        assert.ok(!/--apply/.test(layer), `${name} does not write before the plugin is installed`);
+
+        const applyHeading = body.match(/^### (\d+)a\. Plugin settings.*$/m);
+        assert.ok(applyHeading, `${name} carries the plugin-settings apply subsection`);
+        assert.ok(body.indexOf(applyHeading[0]) > pluginsAt, `${name} applies after the plugins layer`);
+        // the subsection rides the step that runs the installer - that is why the plugin is on disk
+        assert.match(body, new RegExp(`^## ${applyHeading[1]}\\. (Install|Update)`, 'm'),
+            `${name} hangs ${applyHeading[1]}a off its installer step`);
+        const apply = body.slice(body.indexOf(applyHeading[0]));
+        assert.match(apply, /--apply/, `${name} applies the answer at the install step`);
+        assert.match(apply, /--replace/, `${name} carries the overwrite answer through`);
+    }
+});
+
+test('the always MCP baseline is stack-neutral - a browser or native driver is seeded or proven', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    const evidence = JSON.parse(fs.readFileSync(path.join(ROOT, 'meta', 'evidence.json'), 'utf8'));
+    assert.deepStrictEqual([...(recs.always.mcps || [])].sort(), ['context7', 'serena'], 'only the two rules lock in');
+    for (const server of ['playwright', 'chrome-devtools', 'appium-mcp', 'angular-cli', 'sentry', 'memory'])
+    {
+        assert.ok(!(recs.always.mcps || []).includes(server), `${server} must not install into every project`);
+    }
+
+    // memory was seeded into every install and measured at zero calls across a 164-session audit:
+    // addable from the table, never seeded, and never flagged missing OR redundant by validate -
+    // which is exactly what the `general` list means.
+    assert.ok(((recs.general || {}).mcps || []).includes('memory'), 'memory is offered, not seeded');
+
+    // the heavy two fail at launch without Chrome / the mobile SDKs, so no stack seeds them; the
+    // native driver reaches a project through its own dependency instead.
+    for (const heavy of ['chrome-devtools', 'appium-mcp'])
+    {
+        const seededBy = Object.entries(recs.stacks).filter(([, sel]) => (sel.mcps || []).includes(heavy)).map(([st]) => st);
+        assert.deepStrictEqual(seededBy, [], `${heavy} is addable only, seeded by no stack`);
+    }
+    assert.ok((evidence.mcps || {})['appium-mcp'], 'appium-mcp arrives by proof - its own dependency');
+
+    // two proven routes into a project: a stack whose surface always has a browser, or the packages
+    const seeded = Object.entries(recs.stacks).filter(([, sel]) => (sel.mcps || []).includes('playwright')).map(([st]) => st).sort();
+    assert.deepStrictEqual(seeded, ['browser-extension', 'ionic-angular', 'web-angular']);
+    assert.ok((evidence.mcps || {}).playwright, 'and an evidence signal for any other stack that actually uses it');
+});
+
+test('every shipped plugin is reachable from a seed closure - validate cannot flag what nothing seeds', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    const sh = fs.readFileSync(path.join(ROOT, 'scripts', 'os', 'claude-stack.sh'), 'utf8');
+    const block = sh.match(/^PLUGINS=\(\n([\s\S]*?)^\)/m);
+    assert.ok(block, 'the installer PLUGINS manifest is readable');
+    const shipped = [...block[1].matchAll(/^\s*"([A-Za-z0-9_.-]+)@/gm)].map(m => m[1]).sort();
+    assert.ok(shipped.length >= 5, 'the manifest lists the shipped plugins');
+
+    // findStackMissing sources are the always baseline plus each DETECTED stack, both run through
+    // the closure - so a plugin no seed reaches is invisible to validate's ADD side on every
+    // install. Measured: three of the seven sat outside every seed, one of them the commit-time
+    // security gate, and a validate run reported nothing missing while it was not installed.
+    const reachable = new Set(computeClosure(graph, recs.always).plugins || []);
+    for (const sel of Object.values(recs.stacks)) for (const p of computeClosure(graph, sel).plugins || []) reachable.add(p);
+
+    // The `general` list is the DELIBERATE third route, the same treatment the memory MCP got at
+    // zero measured use: offered in the plugins table, never pre-selected, and never flagged
+    // missing OR redundant by validate (stack-select.js skips a general name in both directions).
+    // So a general plugin is not invisible by accident - it is a decision, and it has to be in
+    // this list to be one. claude-md-management moved here at 1 use in 115 sessions.
+    const general = new Set((recs.general || {}).plugins || []);
+    for (const name of general) assert.ok(shipped.includes(name), `${name} is on the general list but the installer does not ship it`);
+    for (const name of shipped) assert.ok(reachable.has(name) || general.has(name), `${name} is reachable from a seed closure, or deliberately on the general opt-in list`);
+});
+
+test('every C# vertical closure carries the dotnet router its csharp baseline routes through', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    for (const st of ['aspnet', 'wpf', 'console'])
+    {
+        const closed = computeClosure(graph, recs.stacks[st]);
+        assert.ok(closed.skills.includes('dotnet'), `${st} closure pulls the dotnet router`);
+        assert.ok(closed.skills.includes('csharp'), `${st} closure pulls csharp`);
+    }
+});
+
+test('the typescript pseudo-stack seeds the TS rule and LSP plugin for plain TS/Node repos', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    const ts = recs.stacks.typescript;
+    assert.ok(ts, 'a typescript stack recommendation exists');
+    assert.ok((ts.rules || []).includes('typescript-conventions'), 'seeds the conventions rule');
+    assert.ok((ts.plugins || []).includes('typescript-lsp'), 'seeds the LSP plugin');
+    assert.ok(computeClosure(graph, ts).skills.includes('typescript'), 'the closure pulls the typescript skill via the rule');
+});
+
+test('a single-stack (aspnet) recommendation does not pull cross-stack skills', () => {
+    const recs = JSON.parse(fs.readFileSync(RECS, 'utf8'));
+    const closed = computeClosure(graph, { agents: [...(recs.always.agents||[]), ...recs.stacks.aspnet.agents], rules: [...(recs.always.rules||[]), ...recs.stacks.aspnet.rules], plugins: recs.stacks.aspnet.plugins });
+    // dotnet-wpf is left out of this list on purpose: it still reaches an aspnet
+    // closure via the shared dotnet-build-error-resolver / dotnet-test-failure-resolver
+    // (both part of aspnet's own seed, mentioning dotnet-wpf for mixed-solution build
+    // errors) - a separate, pre-existing edge this always-roster trim does not touch.
+    for (const cross of ['angular-security', 'ionic', 'ionic-security'])
+    {
+        assert.ok(!closed.skills.includes(cross), `aspnet setup must not pull ${cross}`);
+    }
+    assert.ok(closed.skills.includes('csharp') && closed.skills.includes('dotnet-web-backend'), 'still pulls its own vertical');
+});
+
+for (const name of ['setup', 'update', 'configure', 'validate', 'status'])
+{
+    test(`the ${name} command exists with valid manual-only frontmatter`, () => {
+        const cmd = path.join(PLUGIN_DIR, 'commands', `${name}.md`);
+        assert.ok(fs.existsSync(cmd), 'command file exists');
+        const fm = fs.readFileSync(cmd, 'utf8').match(/^---\r?\n([\s\S]*?)\r?\n---/);
+        assert.ok(fm, 'has frontmatter');
+        assert.match(fm[1], /description:\s*\S/, 'has a description (shown in the / picker)');
+        assert.match(fm[1], /disable-model-invocation:\s*true/, 'manual-only');
+    });
+}
+
+test('the guided walks hold the layer order, the step banners, and the cascade machinery', () => {
+    for (const name of ['setup', 'configure', 'validate'])
+    {
+        const body = fs.readFileSync(path.join(PLUGIN_DIR, 'commands', `${name}.md`), 'utf8');
+        assert.match(body, /rules -> agents -> skills -> hooks -> MCPs -> plugins/, `${name} walks the layers in dependency order`);
+        assert.match(body, /\[step \d+\/\d+ - /, `${name} announces every step with the n/total banner`);
+    }
+    const configure = fs.readFileSync(path.join(PLUGIN_DIR, 'commands', 'configure.md'), 'utf8');
+    assert.match(configure, /--dropped/, 'configure drives the drop cascade through stack-select --dropped');
+    assert.match(configure, /orphan:/, 'configure consumes the orphan: lines');
+});
+
+// The install-time twin of validate's judgment gate: a typed add that conflicts with the
+// project's stated conventions gets a quote-gated, non-blocking warning at the prereq step.
+test('setup and configure carry the brownfield convention-conflict warning gate', () => {
+    for (const name of ['setup', 'configure'])
+    {
+        const body = fs.readFileSync(path.join(PLUGIN_DIR, 'commands', `${name}.md`), 'utf8');
+        assert.match(body, /Convention-conflict warnings/, `${name} has the conflict-warning gate`);
+        assert.match(body, /No citable conflict, no\s+warning/, `${name} keeps the citation gate`);
+        assert.match(body, /never blocks/, `${name} keeps the warning non-blocking`);
+    }
+});
+
+test('validate reconciles both ways (--redundant + --missing), walks layers, is project-mode-only', () => {
+    const body = fs.readFileSync(path.join(PLUGIN_DIR, 'commands', 'validate.md'), 'utf8');
+    assert.match(body, /--redundant/, 'validate drives the remove side through stack-select --redundant');
+    assert.match(body, /--missing/, 'validate drives the add side through stack-select --missing');
+    assert.match(body, /\[step \d+\/\d+ - /, 'validate announces every step with the n/total banner');
+    assert.match(body, /project mode only/i, 'validate refuses outside a project');
+    assert.match(body, /claude-stack\.sh" install/, 'validate installs the accepted adds via the installer');
+    // the judgment step: two gates (code-corroborated non-use, verbatim doc conflict), never
+    // mixed with signal tiers
+    assert.match(body, /JUDGMENT-DROP/, 'the judgment step exists with its labeled verdict');
+    assert.match(body, /No gate evidence, no proposal/, 'judgment proposals are gate-evidence-gated');
+    assert.match(body, /corroborate non-use in the code/, 'the advisory list is the judgment step\'s first input');
+    assert.match(body, /read code and manifests,\s+not conventions/, 'no project docs skips only the doc path, not the corroboration path');
+    // the data-driven judgment candidates: overlap/dormant lines + precomputed version conflicts
+    assert.match(body, /JUDGMENT-ADD/, 'the corroborated-need gate exists');
+    assert.match(body, /--judgment/, 'validate computes the judgment lines through the tool');
+    assert.match(body, /`overlap:`/, 'overlap candidates come from the tool output');
+    assert.match(body, /`dormant:`/, 'dormant advisories come from the tool output');
+});
+
+test('every command holds to the shared one-download protocol and the router skill names them all', () => {
+    for (const name of ['setup', 'update', 'configure'])
+    {
+        const body = fs.readFileSync(path.join(PLUGIN_DIR, 'commands', `${name}.md`), 'utf8');
+        assert.match(body, /\$\{CLAUDE_PLUGIN_ROOT\}\/references\/source-protocol\.md/, `${name} cites the shared source-protocol.md via the plugin root`);
+    }
+    const router = fs.readFileSync(path.join(PLUGIN_DIR, 'skills', 'claude-stack', 'SKILL.md'), 'utf8');
+    assert.match(router.match(/^---\r?\n([\s\S]*?)\r?\n---/)[1], /name:\s*claude-stack/, 'router skill named like the plugin -> displays bare /claude-stack');
+    for (const name of ['setup', 'update', 'configure'])
+    {
+        assert.match(router, new RegExp('/claude-stack:' + name), `/claude-stack routes to /claude-stack:${name}`);
+    }
+});

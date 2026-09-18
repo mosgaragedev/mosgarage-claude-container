@@ -1,0 +1,2455 @@
+#!/usr/bin/env node
+'use strict';
+
+// analyze-usage.js - offline token/tool consumption report for a Claude Code session.
+//
+// Why: hooks see WHO fired (instrument-tool-usage.js) but can never see tokens - token
+// accounting lives per API message in the transcript JSONL Claude Code already writes.
+// This script mines that transcript (plus the session's subagents/ directory) and emits
+// the consumption report an agent-flow tuning pass needs: tokens by scope and model,
+// exact per-dispatch subagent cost, skill/MCP/tool call+result volume, context-growth
+// spikes, and an optional join against an instrument-tool-usage.js hook log.
+//
+// Usage:
+//   node scripts/analyze-usage.js <session.jsonl>                  # full report for one session
+//   node scripts/analyze-usage.js <projects-dir>                   # one-line rollup per session
+//   node scripts/analyze-usage.js <session.jsonl> --hook-log <f>   # join a <docs-path>/tools-usage/<sid>.jsonl ledger
+//   node scripts/analyze-usage.js <session.jsonl> --hook-blocks <d> # per-HOOK block counts from <docs-path>/hook-blocks/
+//   node scripts/analyze-usage.js <session.jsonl> --json           # machine-readable dump
+//   node scripts/analyze-usage.js <session.jsonl> --report-md      # markdown report skeleton (machine tables + FILL IN sections)
+//   node scripts/analyze-usage.js <s.jsonl> --from <ISO> --to <ISO> # window one run inside a long session
+//   node scripts/analyze-usage.js <s.jsonl> --docs-root <path>     # extra docs prefix when CLAUDE_STACK_DOCS_PATH is non-default
+//   node scripts/analyze-usage.js <s.jsonl> --inventory <.claude>  # the installed set the INVENTORY vs USE block scores
+//   node scripts/analyze-usage.js <s.jsonl> --plugins <installed_plugins.json>  # the plugin inventory, when not this machine's
+//
+// INVENTORY vs USE answers the complement of every consumption table: which installed skill,
+// agent, rule, plugin and MCP server the session (or, in directory mode, the corpus) never
+// touched. The installed set is read off disk - `--inventory`, else the transcript's own cwd's
+// `.claude` when this machine has it, else the stack catalog beside this script, labeled as such.
+//
+// The headline health signal is ctx/msg (avg context re-sent per API call = input +
+// cache-write + cache-read over msgs): high tool-result volume means noisy tools, but a
+// high ctx/msg means carried-forward conversation - the cost driver windowing isolates.
+//
+// Transcripts live under ~/.claude/projects/<encoded-project-path>/: the main session is
+// <session-id>.jsonl, its dispatched subagents under <session-id>/subagents/agent-*.jsonl
+// (+ .meta.json with agentType/description/toolUseId). Facts this parser relies on,
+// verified against real transcripts: one API response is split across several assistant
+// lines that each repeat the same message.id with usage that is IDENTICAL (main session)
+// or a PROGRESSIVE streaming snapshot (subagent files: output_tokens grows 4 -> 9579
+// across lines) - so usage is folded as an elementwise max per message.id, never summed
+// per line and never first-wins; tool_use ids are globally unique; assistant lines carry
+// attributionSkill/attributionPlugin while a skill is active; result sizes are measured
+// in chars and reported as ~tokens (chars/4) - approximate, oversized results may be
+// offloaded to tool-results/ and undercount.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const readline = require('readline');
+
+// ---------- small helpers ----------
+
+const fmt = (n) => {
+  if (n == null) return '-';
+  if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(Math.round(n));
+};
+const approxTok = (chars) => Math.round(chars / 4);
+const dur = (ms) => {
+  if (!ms || ms < 0) return '-';
+  const m = Math.round(ms / 60000);
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+};
+const pad = (s, w) => String(s).length >= w ? String(s) : String(s) + ' '.repeat(w - String(s).length);
+const rpad = (s, w) => String(s).length >= w ? String(s) : ' '.repeat(w - String(s).length) + String(s);
+
+// ---------- the efficiency scorecard's classifiers ----------
+// The scorecard measures each session against the practices the official Claude Code guidance and
+// the stack's own audits agree on, as NUMBERS with denominators - the report judges them. Every
+// classifier here is a measurement, never a gate: a hook grows a class only after these rows have
+// shown its rate for a week.
+// Prose as guard-answer-length.js defines it (fences, tables, quotes, inline code stripped), so
+// the analyzer counts what the hook would see.
+function proseOf(text) {
+  return String(text || '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/^\s*\|.*$/gm, '')
+    .replace(/^\s*>.*$/gm, '')
+    .replace(/`[^`\n]*`/g, '')
+    .replace(/\]\([^)\s]*\)/g, ']')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+const LONG_ANSWER = 1800;   // guard-answer-length's HARD_CAP
+const STREAK_TURNS = 3, STREAK_SHORT = 200, STREAK_LONG = 1500;   // its correction-streak detector
+const CHECK_WINDOW = 40;    // tool calls a check may sit before a commit and still count as its check
+// Build output, package trees, caches and lockfiles - a read there is a read of nothing the session
+// wrote. `bin/` catches a script dir too, so the report prints the paths and the reader judges.
+const BUILD_DIR_RE = /(?:^|[\/\\])(?:node_modules|bin|obj|dist|coverage|TestResults|target|__pycache__|\.venv|venv|vendor|\.git|\.angular|\.nuget|\.serena|\.playwright|\.next|\.nuxt|\.gradle|\.idea|\.vs)(?:[\/\\]|$)|(?:^|[\/\\])(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|packages\.lock\.json|Cargo\.lock|poetry\.lock|composer\.lock)$|\.(?:log|min\.js|min\.css|map)$/;
+// The first file a dump verb names - the same read routed through the shell.
+const isShellTool = (name) => name === 'Bash' || name === 'PowerShell';
+function shellReadTarget(cmd) {
+  const m = /(?:^|[;&|(]\s*)(?:cat|head|tail|less|more|bat)\s+(?:-[\w-]+(?:\s+\d+)?\s+)*["']?([^\s"'|;&<>)]+)/.exec(cmd)
+    || /(?:^|[;&|(]\s*)sed\s+-n\s+(?:-e\s+)?["']?[\d,$p;]+["']?\s+["']?([^\s"'|;&<>)]+)/.exec(cmd);
+  if (!m) return null;
+  const p = m[1];
+  if (p.includes('$') || /[*?\[]/.test(p) || p === '-') return null;
+  return p;
+}
+// A CHECK is something that returns a pass/fail the session can read: a test run, a build, a lint,
+// a CI status read. A test run is SCOPED when it names one project, one file, one filter.
+const CHECK_RES = {
+  test: /(?:^|[;&|(]\s*)(?:dotnet\s+test|npm\s+(?:run\s+)?test\S*|pnpm\s+(?:run\s+)?test\S*|yarn\s+(?:run\s+)?test\S*|npx\s+(?:jest|vitest|mocha|playwright\s+test)|jest|vitest|mocha|ng\s+test|pytest|python3?\s+-m\s+pytest|go\s+test|cargo\s+test|node\s+--test|mvn\s+test|gradle\s+test|phpunit)\b/,
+  build: /(?:^|[;&|(]\s*)(?:dotnet\s+(?:build|publish)|npm\s+run\s+build\S*|pnpm\s+(?:run\s+)?build|yarn\s+(?:run\s+)?build|ng\s+build|npx\s+tsc|tsc|msbuild|cargo\s+build|go\s+build|mvn\s+(?:package|compile|install)|gradle\s+(?:build|assemble))\b/,
+  lint: /(?:^|[;&|(]\s*)(?:npm\s+run\s+lint\S*|pnpm\s+(?:run\s+)?lint|yarn\s+(?:run\s+)?lint|npx\s+eslint|eslint|ng\s+lint|dotnet\s+format|ruff|flake8|golangci-lint|cargo\s+clippy)\b/,
+  ci: /(?:^|[;&|(]\s*)gh\s+(?:run\s+(?:view|watch|list)|pr\s+checks)\b/,
+};
+const SCOPED_RE = /--filter[= ]|--test-name-pattern|--testNamePattern|--testPathPattern|\s-t\s|\s-k\s|--grep[= ]|--include[= ]|--run\s+\S|[\w./-]+\.(?:spec|test)\.[cm]?[jt]sx?\b|[\w./-]+_test\.go\b|\btest_\w+\.py\b|::\w|[\w./-]+\.csproj\b|node\s+--test\s+[\w./-]+\.[cm]?js\b|cargo\s+test\s+[\w:]+|go\s+test\s+(?!\.\/\.\.\.)[\w./-]+/;
+function classifyCheck(cmdCode, cmdShell) {
+  for (const kind of ['test', 'build', 'lint', 'ci']) {
+    if (CHECK_RES[kind].test(cmdCode)) return { kind, scoped: kind === 'test' ? SCOPED_RE.test(cmdShell) : undefined };
+  }
+  return null;
+}
+// A GREEN CLAIM: prose saying a check passed. The turn it lands in either ran a check or it did not.
+const GREEN_RE = /\b(?:all\s+(?:\d[\d,]*\s+)?tests?|tests?|test\s+suite|suite|build|lint|linter|typecheck|type-check|checks?|ci)\b[^.!?\n]{0,60}?\b(?:pass(?:es|ed|ing)?|green|succeed(?:s|ed)?|clean|ok)\b|\b\d[\d,]*\s*\/\s*\d[\d,]*\s+(?:tests?\s+)?pass(?:ed|ing)?\b/gi;
+function claimsGreen(prose) {
+  GREEN_RE.lastIndex = 0;
+  let m;
+  while ((m = GREEN_RE.exec(prose))) {
+    const before = prose.slice(Math.max(0, m.index - 24), m.index);
+    if (/\b(?:not|no|never|n't|until|if|when|once|should|will|would|must|before|fail\w*)\b[^.]{0,20}$/i.test(before)) continue;
+    if (/\b(?:not|n't|never|fail)/i.test(m[0])) continue;
+    return true;
+  }
+  return false;
+}
+
+function newTally() { return { input: 0, cacheCreate: 0, cacheRead: 0, output: 0, msgs: 0 }; }
+const ctxOf = (t) => (t.msgs ? Math.round((t.input + t.cacheCreate + t.cacheRead) / t.msgs) : 0);
+function addUsage(t, u) {
+  t.input += u.input_tokens || 0;
+  t.cacheCreate += u.cache_creation_input_tokens || 0;
+  t.cacheRead += u.cache_read_input_tokens || 0;
+  t.output += u.output_tokens || 0;
+  t.msgs += 1;
+}
+function mergeTally(a, b) {
+  a.input += b.input; a.cacheCreate += b.cacheCreate; a.cacheRead += b.cacheRead;
+  a.output += b.output; a.msgs += b.msgs;
+}
+
+function readJsonl(file, onObj) {
+  return new Promise((resolve, reject) => {
+    const rl = readline.createInterface({ input: fs.createReadStream(file) });
+    rl.on('line', (l) => { try { onObj(JSON.parse(l), l); } catch { /* skip broken line */ } });
+    rl.on('close', resolve);
+    rl.on('error', reject);
+  });
+}
+
+// ---------- generated-docs consumption ----------
+// The capture skills' whole value claim is that seats READ these docs instead of
+// re-deriving the project - so consumption is a first-class signal, not a grep afterthought.
+// Style delivery is counted via stable marker phrases: the generated project-code-style
+// rule's heading (current mechanism - see the skill's code-style-rule template) and the
+// retired inject-code-style hook's injected preamble (legacy sessions).
+
+const STYLE_RULE_MARKER = 'the project-code-style-analyzer skill owns this rule';
+const STYLE_INJECT_MARKER = 'maintained by the project-code-style-analyzer';
+const docsPrefixes = ['/.claude/docs/'];
+// The same roots, spelled for the BASH route: no leading separator, because a command names the
+// path relative or absolute and the match anchors on a shell boundary instead. `--docs-root` used
+// to reach only the Read/Write route, so a project with a remapped docs root had its heredocs,
+// redirects and `rm`s invisible in the same table that showed its Read/Write touches - one table
+// answering two ways.
+const bashDocRoots = () => docsPrefixes.map((p) => p.replace(/^\//, ''));
+
+// The prefix is spelled with forward slashes while a Windows session writes a backslash path,
+// so the generated-docs table scored 0 writes for every document a Windows run demonstrably wrote
+// (measured: five Write calls, three docs, all reported as untouched). Normalize the separator
+// before matching - the prefix list stays in one spelling.
+function docRelPath(filePath) {
+  const norm = String(filePath).replace(/\\/g, '/');
+  for (const p of docsPrefixes) {
+    const i = norm.indexOf(p);
+    if (i >= 0) return norm.slice(i + p.length);
+  }
+  return null;
+}
+
+// ---------- installed inventory: what the project HAS, against what a session USED ----------
+// The report measured consumption and never its complement: a 79-skill install could show three
+// skills used and say nothing at all about the other 76, so 'unused in this corpus' was an ad-hoc
+// script every time it was asked. The inventory side is read off DISK - the project's own
+// `.claude` directory when this machine has it, the stack's own catalog otherwise, and a catalog
+// row is labeled as such because it proves the stack SHIPS the artifact, never that this project
+// installed it.
+
+// `paths:` takes globs and brace expansion only - no negation form, and an invalid pattern matches
+// nothing (the maintainer note in markdown-docs.md records the same reading of the Claude Code
+// memory docs). This is that subset, so the proxy matches what the harness would have attached.
+function globToRe(glob) {
+  const g = String(glob).replace(/\\/g, '/');
+  let re = '';
+  let depth = 0;
+  for (let i = 0; i < g.length; i += 1) {
+    const c = g[i];
+    if (c === '*') {
+      if (g[i + 1] === '*') {
+        i += 1;
+        if (g[i + 1] === '/') { i += 1; re += '(?:.*/)?'; } else re += '.*';
+      } else re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else if (c === '{') { depth += 1; re += '(?:'; }
+    else if (c === '}' && depth) { depth -= 1; re += ')'; }
+    else if (c === ',' && depth) re += '|';
+    else re += c.replace(/[.+^$()|[\]\\/{},]/g, '\\$&');
+  }
+  while (depth > 0) { re += ')'; depth -= 1; }   // a malformed pattern must not kill the run
+  try { return new RegExp(`^${re}$`); } catch { return /$^/; }
+}
+
+// A frontmatter subset - `key: value`, an inline `["a", "b"]` array, and the indented `- item`
+// block list the agent seats write their `skills:` preload as. Enough for `paths:`, `skills:` and
+// `name:`; a full YAML parser is a dependency this repo does not carry for three keys.
+function parseFrontmatter(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(text || ''));
+  if (!m) return {};
+  const out = {};
+  const lines = m[1].split(/\r?\n/);
+  const unquote = (v) => v.trim().replace(/^['"]|['"]$/g, '');
+  for (let i = 0; i < lines.length; i += 1) {
+    const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(lines[i]);
+    if (!kv) continue;
+    const val = kv[2].trim();
+    if (val === '') {
+      const items = [];
+      while (i + 1 < lines.length && /^\s+-\s+/.test(lines[i + 1])) { items.push(unquote(lines[i + 1].replace(/^\s+-\s+/, ''))); i += 1; }
+      out[kv[1]] = items;
+    } else if (val.startsWith('[')) {
+      // Quoted items first: `paths: ["**/*.{ts,tsx}"]` carries a comma INSIDE a brace group, and
+      // a plain split on commas tore that glob in half (which then threw on the RegExp).
+      const inner = val.replace(/^\[|\]$/g, '');
+      const quoted = [...inner.matchAll(/'([^']*)'|"([^"]*)"/g)].map((q) => (q[1] !== undefined ? q[1] : q[2]));
+      out[kv[1]] = quoted.length ? quoted : inner.split(',').map(unquote).filter(Boolean);
+    } else {
+      out[kv[1]] = unquote(val);
+    }
+  }
+  return out;
+}
+
+function dirEntries(dir) {
+  try { return fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+}
+function readHead(file) {
+  try { return fs.readFileSync(file, 'utf8'); } catch { return ''; }
+}
+const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+
+// A skill is a DIRECTORY carrying SKILL.md (both the catalog and an installed `.claude/skills`
+// use that shape); a loose `.md` beside them is read too, so a hand-rolled install still lists.
+function loadSkillsDir(dir) {
+  const out = [];
+  for (const e of dirEntries(dir)) {
+    if (e.isDirectory()) {
+      const f = path.join(dir, e.name, 'SKILL.md');
+      if (fs.existsSync(f)) out.push({ name: e.name, file: f });
+    } else if (e.isFile() && /\.md$/.test(e.name) && e.name !== 'README.md') {
+      out.push({ name: e.name.replace(/\.md$/, ''), file: path.join(dir, e.name) });
+    }
+  }
+  return out.sort(byName);
+}
+
+// An agent's `skills:` frontmatter is the PRELOAD list - those skills enter the seat's context on
+// dispatch without a Skill call of their own, so a skill can be paid for in full and show zero
+// calls. That is a different column, never the same one.
+function loadAgentsDir(dir) {
+  const out = [];
+  for (const e of dirEntries(dir)) {
+    if (!e.isFile() || !/\.md$/.test(e.name)) continue;
+    const file = path.join(dir, e.name);
+    const fm = parseFrontmatter(readHead(file));
+    out.push({ name: fm.name || e.name.replace(/\.md$/, ''), file, skills: Array.isArray(fm.skills) ? fm.skills : [] });
+  }
+  return out.sort(byName);
+}
+
+// A rule with no `paths:` is always-on: it is in every prompt of every session, so 'used' is not a
+// question a transcript can answer. Say that rather than scoring it 0.
+function loadRulesDir(dir) {
+  const out = [];
+  for (const e of dirEntries(dir)) {
+    if (!e.isFile() || !/\.md$/.test(e.name)) continue;
+    const file = path.join(dir, e.name);
+    const fm = parseFrontmatter(readHead(file));
+    const globs = Array.isArray(fm.paths) ? fm.paths : (fm.paths ? [String(fm.paths)] : []);
+    out.push({ name: e.name, file, globs, alwaysOn: globs.length === 0 });
+  }
+  return out.sort(byName);
+}
+
+// Directory mode used to read only the `.jsonl` files sitting directly inside the folder it was
+// given, so the collected-bundle layout - `<corpus>/<project>/<session-id>/<session-id>.jsonl`
+// with `subagents/` beside it - printed an empty TOTAL and no inventory at all, and the corpus
+// answer needed a throwaway script. The walk is recursive, and it excludes what is NOT a session:
+// a dispatched seat's own transcript (its cost is already counted under its parent, and counting
+// it again as a session would double the corpus), and the two ledger families, which are JSONL of
+// the same shape and would otherwise open a row per file with a '?' start - measured on the local
+// corpus: 313 real transcripts against 198 ledger files under `tools-usage/` and `hook-blocks/`
+// plus 147 more named `tool-usage-<sid>` / `hook-blocks-<sid>` inside the bundles.
+const NON_SESSION_DIRS = new Set(['subagents', 'tools-usage', 'tool-usage', 'hook-blocks']);
+const LEDGER_FILE_RE = /^(?:tools?-usage|hook-blocks)-/;
+function findSessionFiles(root, depth = 0, out = []) {
+  for (const e of dirEntries(root)) {
+    const full = path.join(root, e.name);
+    if (e.isDirectory()) {
+      if (NON_SESSION_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+      if (depth < 6) findSessionFiles(full, depth + 1, out);
+    } else if (e.isFile() && e.name.endsWith('.jsonl') && !LEDGER_FILE_RE.test(e.name)) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+const CATALOG_DIR = path.join(__dirname, '..', 'stack');
+
+// The transcript's `cwd` is the path on the machine that RAN the session - usually not this one,
+// which is exactly why the catalog fallback exists and why it says so in its own label.
+function resolveInventory(explicitDir, cwd) {
+  const tryDir = (d, kind, why) => {
+    if (!d) return null;
+    const skills = loadSkillsDir(path.join(d, 'skills'));
+    const agents = loadAgentsDir(path.join(d, 'agents'));
+    const rules = loadRulesDir(path.join(d, 'rules'));
+    if (!skills.length && !agents.length && !rules.length) return null;
+    return { dir: d, kind, why, skills, agents, rules };
+  };
+  if (explicitDir) {
+    return tryDir(explicitDir, 'project', `project ${explicitDir}`)
+      || { dir: explicitDir, kind: 'project', why: `project ${explicitDir} (no skills/, agents/ or rules/ under it)`, skills: [], agents: [], rules: [] };
+  }
+  if (cwd) {
+    const d = path.join(String(cwd).replace(/\\/g, '/'), '.claude');
+    const inv = fs.existsSync(d) ? tryDir(d, 'project', `project ${d} (the transcript's own cwd)`) : null;
+    if (inv) return inv;
+  }
+  return tryDir(CATALOG_DIR, 'catalog', 'catalog (installed set unknown)')
+    || { dir: null, kind: 'none', why: 'none reachable on this machine', skills: [], agents: [], rules: [] };
+}
+
+// installed_plugins.json keys are `<plugin>@<marketplace>`; each value is the per-scope install
+// records, and `installPath` is where that plugin's own agents and MCP servers can be read.
+function loadPlugins(explicit) {
+  const cands = [];
+  if (explicit) cands.push(explicit);
+  else {
+    if (process.env.CLAUDE_CONFIG_DIR) cands.push(path.join(process.env.CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json'));
+    cands.push(path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json'));
+  }
+  for (const f of cands) {
+    let j;
+    try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { continue; }
+    const byPlugin = new Map();
+    for (const [key, recs] of Object.entries(j.plugins || {})) {
+      const name = key.split('@')[0];
+      const e = byPlugin.get(name) || { name, agents: [], servers: [] };
+      for (const r of Array.isArray(recs) ? recs : []) {
+        const root = r && r.installPath;
+        if (!root) continue;
+        for (const a of loadAgentsDir(path.join(root, 'agents'))) if (!e.agents.includes(a.name)) e.agents.push(a.name);
+        try {
+          const mc = JSON.parse(fs.readFileSync(path.join(root, '.mcp.json'), 'utf8'));
+          for (const s of Object.keys(mc.mcpServers || {})) if (!e.servers.includes(s)) e.servers.push(s);
+        } catch { /* a plugin without its own servers */ }
+      }
+      byPlugin.set(name, e);
+    }
+    return { list: [...byPlugin.values()].sort(byName), source: f };
+  }
+  return { list: null, source: 'unknown' };
+}
+
+// `.mcp.json` sits beside `.claude` at the project root. Only a PROJECT inventory has one that
+// means anything - the catalog fallback would read this repo's own file and call it the install.
+function loadMcpInventory(inv) {
+  if (!inv || inv.kind !== 'project' || !inv.dir) return { names: null, source: 'the servers seen in tool names' };
+  const f = path.join(path.dirname(inv.dir), '.mcp.json');
+  try {
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    return { names: Object.keys(j.mcpServers || {}).sort(), source: f };
+  } catch { return { names: null, source: 'the servers seen in tool names' }; }
+}
+
+// One accumulator, fed one session at a time, so the rollup over a whole corpus never holds every
+// session's stats in memory at once - `used in N of M sessions` is the corpus answer, and the
+// never-used set per layer is the question that filed this block.
+//
+// The installed set is resolved PER SESSION, from that session's own cwd: a corpus spans projects
+// that installed different things, and seeding one project's inventory over all of them reports a
+// name as unused in projects that never had it. Every name therefore carries `installedIn` beside
+// `sessionsUsed`, the unused line names only what was installed somewhere, and the resolution is
+// cached by cwd - so the single-project folder, where every session shares one cwd, still resolves
+// exactly once.
+function newInventoryUse(plugins) {
+  return {
+    plugins, sessions: 0, invCache: new Map(), sources: new Set(), mcpSources: new Set(),
+    skills: new Map(), agents: new Map(), rules: new Map(), plugins_: new Map(), mcps: new Map(),
+  };
+}
+
+function inventoryFor(acc, inventoryDir, cwd) {
+  const key = inventoryDir || cwd || '(none)';
+  let hit = acc.invCache.get(key);
+  if (!hit) {
+    const inv = resolveInventory(inventoryDir, cwd);
+    hit = { inv, mcp: loadMcpInventory(inv) };
+    acc.invCache.set(key, hit);
+  }
+  return hit;
+}
+
+function addSessionUse(acc, main, agents, inventoryDir) {
+  acc.sessions += 1;
+  const { inv, mcp } = inventoryFor(acc, inventoryDir, main.cwd);
+  acc.sources.add(inv.why);
+  acc.mcpSources.add(mcp.source);
+  const invSource = inv.kind === 'catalog' ? 'catalog' : 'installed';
+  const install = (map, name, source, extra) => {
+    let r = map.get(name);
+    if (!r) { r = { name, source, used: 'no', how: {}, firstTs: null, sessionsUsed: 0, installedIn: 0 }; map.set(name, r); }
+    r.installedIn += 1;
+    // a real project inventory outranks a catalog label, and both outrank 'observed'
+    if (source === 'installed' || r.source === 'observed') r.source = source;
+    Object.assign(r, extra || {});
+    return r;
+  };
+  for (const s of inv.skills) install(acc.skills, s.name, invSource);
+  for (const a of inv.agents) install(acc.agents, a.name, invSource);
+  for (const r of inv.rules) {
+    const row = install(acc.rules, r.name, invSource);
+    // A rule path-scoped in ANY install is observable; only one that is always-on everywhere is not.
+    if (!r.alwaysOn) row.alwaysOn = false;
+    else if (row.alwaysOn !== false) row.alwaysOn = true;
+    if (row.used === 'no' && row.alwaysOn) row.used = 'not observable';
+    if (row.used === 'not observable' && row.alwaysOn === false) row.used = 'no';
+  }
+  for (const p of acc.plugins.list || []) install(acc.plugins_, p.name, 'installed');
+  for (const m of mcp.names || []) install(acc.mcps, m, 'installed');
+
+  const srcs = [main, ...agents.map((a) => a.stats)];
+  const seen = new Set();
+  const ensure = (map, name, extra) => {
+    let r = map.get(name);
+    if (!r) { r = { name, source: 'observed', used: 'no', how: {}, firstTs: null, sessionsUsed: 0, installedIn: 0, ...(extra || {}) }; map.set(name, r); }
+    return r;
+  };
+  const mark = (row, how, count, ts) => {
+    if (!count) return;
+    row.used = 'yes';
+    row.how[how] = (row.how[how] || 0) + count;
+    if (ts && (!row.firstTs || ts < row.firstTs)) row.firstTs = ts;
+    seen.add(row);
+  };
+
+  // --- skills: the Skill tool, the slash route, and the seats' frontmatter preload
+  const namespaced = new Map();   // `<plugin>:<x>` called or typed - the plugin layer's evidence
+  const nsPreload = new Map();    // `<plugin>:<x>` named in a dispatched seat's `skills:` list
+  const noteNs = (map, name, n, ts) => {
+    if (!name.includes(':')) return;
+    const ns = name.split(':')[0];
+    const e = map.get(ns) || { n: 0, firstTs: null };
+    e.n += n;
+    if (ts && (!e.firstTs || ts < e.firstTs)) e.firstTs = ts;
+    map.set(ns, e);
+  };
+  for (const src of srcs) {
+    for (const [name, v] of Object.entries(src.skillInvocations || {})) {
+      mark(ensure(acc.skills, name), 'Skill call', v.calls, v.firstTs);
+      noteNs(namespaced, name, v.calls, v.firstTs);
+    }
+    for (const [name, n] of Object.entries(src.commandInvocations || {})) {
+      const ts = (src.commandFirstTs || {})[name] || null;
+      noteNs(namespaced, name, n, ts);
+      // `/clear`, `/model`, `/effort` are the harness's own commands, not skills - a slash turn
+      // only counts against the skills layer when a skill of that name is installed.
+      if (!acc.skills.has(name)) continue;
+      mark(acc.skills.get(name), 'slash command', n, ts);
+    }
+  }
+
+  // --- agents: every dispatch, main session and nested
+  const dispatched = new Map();
+  for (const src of srcs) for (const d of src.agentDispatches || []) {
+    if (!d.subagentType) continue;
+    const e = dispatched.get(d.subagentType) || { n: 0, firstTs: null };
+    e.n += 1;
+    if (d.ts && (!e.firstTs || d.ts < e.firstTs)) e.firstTs = d.ts;
+    dispatched.set(d.subagentType, e);
+  }
+  for (const [type, e] of dispatched) mark(ensure(acc.agents, type), 'dispatched', e.n, e.firstTs);
+  // A seat transcript whose dispatch row sits outside the window (or in another file) is still
+  // proof the seat ran - counted apart so the two numbers never merge into a wrong dispatch count.
+  for (const a of agents) {
+    const t = a.meta && a.meta.agentType;
+    if (!t || dispatched.has(t)) continue;
+    mark(ensure(acc.agents, t), 'seat transcript', 1, a.stats.firstTs);
+  }
+  for (const [type, e] of dispatched) {
+    const meta = inv.agents.find((x) => x.name === type);
+    if (!meta) continue;
+    for (const sk of meta.skills) {
+      mark(ensure(acc.skills, sk), `preloaded via ${type}`, e.n, e.firstTs);
+      // A PLUGIN skill named in a seat's preload list is that plugin's body entering the seat's
+      // context - plugin use, on a different evidence line from a call the session made itself.
+      noteNs(nsPreload, sk, e.n, e.firstTs);
+    }
+  }
+
+  // --- rules: two direct records, then the glob proxy as the floor under them
+  for (const src of srcs) for (const [file, e] of Object.entries(src.ruleAttachments || {})) {
+    const row = ensure(acc.rules, file, { alwaysOn: false, globs: [] });
+    mark(row, 'attached (transcript record)', e.records || 0, e.firstTs);
+    mark(row, 'shell-route notice', e.shellNotices || 0, e.firstTs);
+  }
+  for (const r of inv.rules) {
+    if (r.alwaysOn || !r.globs.length) continue;
+    const res = r.globs.map(globToRe);
+    let n = 0;
+    let first = null;
+    for (const src of srcs) for (const [p, t] of Object.entries(src.fileTouches || {})) {
+      if (!res.some((re) => re.test(String(p).replace(/\\/g, '/')))) continue;
+      n += t.n;
+      if (t.firstTs && (!first || t.firstTs < first)) first = t.firstTs;
+    }
+    mark(acc.rules.get(r.name), 'glob proxy', n, first);
+  }
+
+  // --- MCP servers
+  const serverCalls = new Map();
+  for (const src of srcs) for (const [server, m] of Object.entries(src.mcp || {})) {
+    mark(ensure(acc.mcps, server), 'calls', m.calls, m.firstTs);
+    const e = serverCalls.get(server) || { n: 0, firstTs: null };
+    e.n += m.calls;
+    if (m.firstTs && (!e.firstTs || m.firstTs < e.firstTs)) e.firstTs = m.firstTs;
+    serverCalls.set(server, e);
+  }
+
+  // --- plugins: a hook is not visible in a transcript, so a plugin that ships only hooks can
+  // never be scored used here. Everything else leaves a mark - a namespaced skill or command, one
+  // of the plugin's agents dispatched, one of its MCP servers called, or, for the two `*-lsp`
+  // plugins that ship none of those, an `LSP` tool call.
+  const lsp = { n: 0, firstTs: null };
+  for (const src of srcs) {
+    const t = (src.toolCalls || {}).LSP;
+    if (!t) continue;
+    lsp.n += t.calls;
+    if (t.firstTs && (!lsp.firstTs || t.firstTs < lsp.firstTs)) lsp.firstTs = t.firstTs;
+  }
+  for (const p of acc.plugins.list || []) {
+    const row = acc.plugins_.get(p.name);
+    if (!row) continue;
+    const ns = namespaced.get(p.name);
+    if (ns) mark(row, 'namespaced skill/command', ns.n, ns.firstTs);
+    const pre = nsPreload.get(p.name);
+    if (pre) mark(row, 'preloaded skill', pre.n, pre.firstTs);
+    for (const ag of p.agents) if (dispatched.has(ag)) mark(row, `agent ${ag}`, dispatched.get(ag).n, dispatched.get(ag).firstTs);
+    for (const sv of p.servers) if (serverCalls.has(sv)) mark(row, `mcp ${sv}`, serverCalls.get(sv).n, serverCalls.get(sv).firstTs);
+    if (/-lsp$/.test(p.name)) mark(row, 'LSP call', lsp.n, lsp.firstTs);
+  }
+  for (const [ns, e] of namespaced) if (!acc.plugins_.has(ns)) mark(ensure(acc.plugins_, ns), 'namespaced skill/command', e.n, e.firstTs);
+  for (const [ns, e] of nsPreload) if (!acc.plugins_.has(ns)) mark(ensure(acc.plugins_, ns), 'preloaded skill', e.n, e.firstTs);
+
+  for (const row of seen) row.sessionsUsed += 1;
+}
+
+const LAYER_LABEL = { skills: 'skills', agents: 'agents', rules: 'rules', plugins: 'plugins', mcps: 'MCP servers' };
+
+function finishInventoryUse(acc) {
+  const shape = (row) => ({
+    name: row.name,
+    source: row.source,
+    used: row.used,
+    how: Object.entries(row.how).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} x${n}`),
+    firstUse: row.firstTs,
+    installedIn: row.installedIn,
+    sessionsUsed: row.sessionsUsed,
+    ofSessions: acc.sessions,
+  });
+  const layer = (map) => [...map.values()].sort(byName).map(shape);
+  // A run spanning several projects has several inventories; name them all when they are few and
+  // say how many when they are not - the label is what tells a reader whether a denominator is
+  // this project's or the stack catalog's.
+  const srcLine = (set) => {
+    const list = [...set];
+    if (!list.length) return 'none reachable on this machine';
+    return list.length <= 3 ? list.join('; ') : `${list.length} inventories across the run: ${list.slice(0, 3).join('; ')}, …`;
+  };
+  return {
+    source: {
+      skills_agents_rules: srcLine(acc.sources),
+      plugins: acc.plugins.source,
+      mcps: srcLine(acc.mcpSources),
+      sessions: acc.sessions,
+      inventories: acc.sources.size,
+    },
+    skills: layer(acc.skills),
+    agents: layer(acc.agents),
+    rules: layer(acc.rules),
+    plugins: layer(acc.plugins_),
+    mcps: layer(acc.mcps),
+  };
+}
+
+// One split, two renderers - the text block and the markdown section can never disagree.
+// A name is UNUSED only when something installed it: a skill this corpus never installed anywhere
+// cannot be a non-use finding, and listing it as one is the exact mistake the per-session
+// inventory exists to prevent.
+function inventoryLayers(invUse) {
+  const label = (r) => (r.installedIn && r.installedIn < r.ofSessions ? `${r.name} (installed in ${r.installedIn}/${r.ofSessions})` : r.name);
+  return ['skills', 'agents', 'rules', 'plugins', 'mcps'].map((key) => {
+    const rows = invUse[key] || [];
+    const installed = rows.filter((r) => r.installedIn > 0);
+    return {
+      key,
+      label: LAYER_LABEL[key],
+      used: rows.filter((r) => r.used === 'yes'),
+      usedInstalled: rows.filter((r) => r.used === 'yes' && r.installedIn > 0).length,
+      unused: rows.filter((r) => r.used === 'no' && r.installedIn > 0).map(label),
+      notObservable: rows.filter((r) => r.used === 'not observable').map(label),
+      observedOnly: rows.filter((r) => r.installedIn === 0 && r.used === 'yes').length,
+      total: installed.length,
+      rows: rows.length,
+    };
+  });
+}
+
+const usedCell = (r) => (r.ofSessions > 1 ? `yes (${r.sessionsUsed}/${r.ofSessions})` : 'yes');
+const installedCell = (r) => (r.installedIn ? `${r.installedIn}/${r.ofSessions}` : '-');
+
+// ---------- transcript analysis (main session or one subagent) ----------
+
+// ---------- one quoted-span-and-heredoc discipline, four consumers ----------
+// The same root defect appeared in the commit guard, the publish guard, this script's commit
+// counter and this script's doc matcher: a literal sitting inside PROSE - a heredoc body, a quoted
+// string - read as an invocation. Here it manufactured `git commits 12` for a session that made
+// ZERO, and phantom `flow/COMMIT-GATE` writes, which is the exact fact a protocol check turns on
+// (patched replay of the doc table: 61 rows -> 24).
+//
+// A heredoc body is DATA when it goes to `cat > file` and CODE when it is fed to an interpreter,
+// so only the first kind is masked - blanking both would erase the python doc writes that reach a
+// file from inside a heredoc, which is how this script sees batched doc I/O at all.
+const INTERP_RE = /\b(?:python[\d.]*|node|nodejs|ruby|perl|php|deno|bun|osascript|pwsh|powershell)\b/;
+function maskHeredocs(cmd) {
+  return String(cmd).replace(
+    /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^\s*\2\s*$/gm,
+    (m, _q, _tag, off, whole) => {
+      const header = whole.slice(whole.lastIndexOf('\n', off) + 1, off);
+      if (INTERP_RE.test(header)) return m;               // an inline script - real code
+      const nl = m.indexOf('\n');
+      return nl === -1 ? m : m.slice(0, nl) + m.slice(nl).replace(/[^\n]/g, ' ');
+    },
+  );
+}
+// Length-preserving and NON-space, so a masked span stays one opaque argument token rather than
+// dissolving the command around it (that is what un-gated `git -C "<dir>" commit` in the guard).
+const maskQuoted = (cmd) => String(cmd)
+  .replace(/'[^'\n]*'/g, (m) => m.replace(/[^\n]/g, 'x'))
+  .replace(/"[^"\n]*"/g, (m) => m.replace(/[^\n]/g, 'x'));
+
+async function analyzeTranscript(file, window) {
+  // A FORK's transcript opens as a copy of its parent's rows. Each row carries the id TWICE:
+  // `sessionId` is rewritten to the fork's own id on the copy, `session_id` keeps the ORIGINAL
+  // (measured: 387 of 1,093 rows in one fork, 0 by the camel-case key) - two forks of one conversation shared 90-92 assistant ids with their parent and the
+  // rollup counted that run three times (measured; the dedupe was done by hand). Rows whose id is
+  // not the file's own are the prefix: counted apart, and the ledger join runs over the tail.
+  const ownId = path.basename(file, '.jsonl');
+  const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f-]{27}$/;
+  const ownIsSession = SESSION_ID.test(ownId);
+  const s = {
+    file,
+    cwd: null,                   // the project path on the machine that RAN this session
+    fileTouches: {},             // path as the call named it -> { n, firstTs } - the rule glob proxy
+    ruleAttachments: {},         // rule file name -> { records, shellNotices, firstTs }
+    commandFirstTs: {},          // slash-command name -> first invocation ts
+    forkPrefix: { rows: 0, msgs: 0, cacheRead: 0, cacheCreate: 0, output: 0, toolCalls: 0, sessionIds: [] },
+    costState: null,             // the cost-state record's own totals - the only side that sees the harness's recap calls
+    toolCallIdx: [],             // { ts, tool } per tool_use outside the fork prefix - the per-side ledger join
+    total: newTally(),
+    byModel: {},                 // model -> tally
+    toolCalls: {},               // tool name -> { calls, resultChars, errors }
+    skillInvocations: {},        // skill slug -> { calls, injectedChars }
+    skillAttribution: {},        // skill slug -> { msgs, output }
+    mcp: {},                     // server -> { calls, resultChars, errors, tools: {tool: n} }
+    agentDispatches: [],         // Agent/Task tool_use in THIS transcript: {id, desc, subagentType}
+    docTouches: {},              // <docs-root>-relative path -> { reads, writes }
+    styleRuleAttaches: 0,        // generated project-code-style rule attachments seen in this transcript
+    styleInjections: 0,          // legacy inject-code-style hook firings seen in this transcript
+    userPrompts: 0,
+    compactions: 0,
+    compactionEvents: [],        // { ts, pre, post, dropped, durationMs } - one row per compaction
+    stopHookBlocks: 0,           // Stop-hook denials: an isMeta user STRING, invisible to is_error
+    harnessDenials: 0,           // denials that are the HARNESS's, not a stack hook's - kept out of hook-blk
+    denialsByHook: {},           // hook file name (or '(unattributed)') -> denials attributed to it
+    topResults: [],              // the N biggest tool results, each with the call's own label
+    peakCtx: 0,                  // largest per-message context carried, and where
+    peakCtxAt: null,
+    floorCtx: 0,                 // smallest per-message context = the standing inventory
+    modelIdsFull: [],            // model ids WITH their window suffix, from cost-state
+    modelIdReminder: null,       // the id the SESSION was told it is running, from its own reminder
+    userInterrupts: 0,           // '[Request interrupted by user]' markers - a stop, never an error
+    lastInterruptTs: null,
+    totalCostUSD: null,
+    thinkingTokens: 0,           // from cost-state.modelUsage - unattributable to any one message
+    commandInvocations: {},      // slash-command name -> count (from <command-name> markers)
+    apiErrors: 0,
+    apiErrorEvents: [],          // { ts, ctx } - the context level each API error fired at
+    firstTs: null,
+    lastTs: null,
+    spikes: [],                  // top context jumps: {ts, delta, ctx, causes}
+    toolCallTs: [],              // one timestamp per tool_use - lets the hook-log join count only in-window calls
+    skillTimeline: [],           // { ts, skill|null } - stamp changes in THIS transcript; lets
+                                 // the report suggest (never charge) a skill for seats whose
+                                 // own transcripts carry no stamp, from their dispatch window
+    efficiency: {                // the practice scorecard - measured here, judged in the report
+      cacheMisses: 0, cacheMissTokens: 0, expectedRebuilds: 0, expectedRebuildTokens: 0, cacheMissAt: [],
+      compactionRereads: [],     // one per compaction: { ts, candidates, files, chars }
+      buildDirReads: { calls: 0, chars: 0, paths: {} },
+      checks: { test: { calls: 0, chars: 0, scoped: 0, whole: 0 }, build: { calls: 0, chars: 0 }, lint: { calls: 0, chars: 0 }, ci: { calls: 0, chars: 0 } },
+      commitsChecked: 0, commitsUnchecked: [],
+      greenClaims: 0, unverifiedGreenClaims: [],
+      correctionStreaks: [],     // the hook's strict detector: timestamps where it would fire
+      correctionTurns: 0,        // short user turns right after a 1,500+ char answer (assistant rows merged)
+      longAnswered: 0,           // 1,500+ char answers a user turn followed
+      finalAnswers: 0, longAnswers: 0,
+    },
+  };
+  const msgReg = new Map();       // message.id -> {model, skill, carried, u:{in,cc,cr,out}} folded max per field
+  const seenToolUse = new Set();  // tool_use id dedup across duplicated assistant lines
+  const toolById = new Map();
+  // doc writes seen in a Bash command, tallied only once the result shows it executed
+  const pendingDocTouch = new Map();     // tool_use id -> { name, skill }
+  const pendingGitActs = new Map();      // tool_use id -> { commits, merges } - released on a non-error result
+  const promptParents = new Set();       // parentUuid of a counted user turn - siblings are the same turn
+  // The ["…/hooks/<file>.js"] bracket is an ATTRIBUTION signal, never the test for a denial: the
+  // JSON permission-decision route carries no bracket at all. An unattributable denial still counts,
+  // it just lands in its own bucket - the transcript alone records which TOOL was denied, never
+  // which hook, and that is the whole reason the hook-block ledger exists.
+  const attributeDenial = (text, ts) => {
+    // The bracket the harness prints is `[node "<path>/hooks/<file>.js"]` - the interpreter, a
+    // SPACE, then the quoted path. The first shape of this pattern allowed no space before the
+    // quote and required the quote to sit right after `[`, so it matched none of the 90 real stack
+    // denials in the audit corpus and every one of them landed in `(unattributed)` - the bucket
+    // meant for the JSON permission-decision route, which made a working attribution look absent.
+    // Windows paths arrive backslashed, so both separators are accepted.
+    const m = /\[[^\]]*[\/\\]hooks[\/\\]([A-Za-z0-9._-]+\.js)/.exec(text);
+    const key = m ? m[1] : '(unattributed)';
+    s.denialsByHook = s.denialsByHook || {};
+    s.denialsByHook[key] = (s.denialsByHook[key] || 0) + 1;
+    // A denial the bracket cannot name is still attributable from the OUTSIDE: every guard writes
+    // its own block-ledger row within milliseconds of denying (measured: 0.3s on the case that
+    // filed this). Keep the timestamp so the report can join it instead of naming a phantom guard.
+    if (!m && ts) (s.unattributedDenials = s.unattributedDenials || []).push(ts);
+  };
+  let prevCtx = null;
+  let pending = [];               // tool results since the previous counted assistant msg
+  // One real compaction emits TWO lines (a system compactMetadata + a user isCompactSummary,
+  // ms apart) - counting both doubled the number in four audited bundles. Count boundaries;
+  // fall back to summaries only for a transcript that carries no boundary lines at all.
+  let compactMeta = 0, compactSummary = 0;
+  // attributionSkill drops to undefined at an async task-notification and never recovers for
+  // the rest of a run (measured: ~2h of one skill's session unattributed). Carry the last
+  // stamp forward - reset at a compaction or a new slash command - and count carried msgs
+  // separately so the report can say how much attribution is inferred vs stamped.
+  let lastSkill = null;
+  // A skill invoked within a few messages of another skill's own invocation is that skill's
+  // in-protocol reference load (a reviewer loading the house style skill), not a new phase.
+  // Without this the stamp switches to the companion and the parent's whole run is
+  // misattributed (measured: a review that caught 2 MATERIAL findings shipped in a report
+  // as '1 msg - not a review pass of substance').
+  const companionOf = {};          // skill -> the parent skill it was loaded in service of
+  let activeInvoke = null;         // { skill, msgs } - last non-companion Skill call + msgs since
+  let askSinceInvoke = false;      // an AskUserQuestion between the parent invoke and a Skill
+  // --- the scorecard's per-transcript trackers ---
+  let prevCache = null;            // { cr, cc } of the previous first-sighted API message
+  let afterCompaction = false;     // the next API message is an EXPECTED rebuild, not a miss
+  const readPaths = new Set();     // every file read so far, by the path the call named
+  let toolSeq = 0;                 // tool_use ordinal in this transcript
+  let lastCheckSeq = -1;           // ordinal of the last test / build / lint / ci-status call
+  let turnHadCheck = false;        // a check ran, or a seat was dispatched, since the last human turn
+  const msgText = new Map();       // message.id -> text so far (one message arrives as several rows)
+  const turns = [];                // { role, len } - the correction-streak view, as the hook builds it
+  let lastAsstId = null;
+  const onHumanTurn = (typed, ts) => {
+    turnHadCheck = false;
+    const t = String(typed || '').trim();
+    if (!t || /^</.test(t)) return;
+    turns.push({ role: 'user', len: t.length });
+    // the loose pair first: the answer before this turn, consecutive assistant rows merged
+    {
+      let j = turns.length - 2, alen = 0;
+      while (j >= 0 && turns[j].role === 'assistant') { alen += turns[j].len; j -= 1; }
+      if (alen >= STREAK_LONG) { s.efficiency.longAnswered += 1; if (t.length <= STREAK_SHORT) s.efficiency.correctionTurns += 1; }
+    }
+    let streak = 0;
+    for (let i = turns.length - 1; i >= 1; i -= 2) {
+      const u = turns[i], a = turns[i - 1];
+      if (u.role !== 'user' || a.role !== 'assistant' || u.len === 0 || u.len > STREAK_SHORT || a.len < STREAK_LONG) break;
+      streak += 1;
+    }
+    if (streak === STREAK_TURNS) s.efficiency.correctionStreaks.push(ts || null);
+  };
+  const openCompactionTracker = (ts) => {
+    afterCompaction = true;
+    s.efficiency.compactionRereads.push({ ts: ts || null, before: new Set(readPaths), seen: new Set(), files: 0, chars: 0 });
+  };
+                                   // call means the user gated a NEW phase - never fold it as
+                                   // a companion (measured: a post-gate flow folded into the
+                                   // ask-side skill and reported as its cost)
+  let lastToolName = null;         // attributes isMeta skill-body injections to spike causes
+  let prevAssistantNoTool = null;  // ts of an end_turn assistant msg with no tool_use
+  s.gitCommits = 0; s.prMerges = 0; s.clearTs = null; s.ccVersion = null;
+  s.unheldStopCandidates = [];     // { stopTs, userTs } - free-text user turn right after a
+                                   // no-tool end_turn: candidate unheld gate for the report's
+                                   // protocol sweep (measured: 5 reports stamped PASS over these)
+
+  await readJsonl(file, (o, raw) => {
+    const origin = typeof o.session_id === 'string' ? o.session_id : typeof o.sessionId === 'string' ? o.sessionId : null;
+    const foreign = ownIsSession && !!origin && origin !== ownId && SESSION_ID.test(origin);
+    if (foreign) {
+      s.forkPrefix.rows += 1;
+      if (!s.forkPrefix.sessionIds.includes(origin)) s.forkPrefix.sessionIds.push(origin);
+    }
+    if (window && o.timestamp) {
+      const ts = Date.parse(o.timestamp);
+      if ((window.from != null && ts < window.from) || (window.to != null && ts > window.to)) return;
+    }
+    // An ATTACHMENT is context the session paid for and the accumulator never saw: the largest
+    // spike in one bundle printed as '(prompt/attachment only)' with no cause at all, because
+    // attachment records never entered `pending`. A file the session itself edited comes back as
+    // an attachment too (`edited_text_file`), which an install RUN generates by the dozen.
+    if (o.type === 'user' && Array.isArray(o.attachments)) {
+      for (const at of o.attachments) {
+        const body = typeof at === 'string' ? at : JSON.stringify(at || '');
+        pending.push({ name: `attachment:${(at && at.type) || 'text'}`, chars: body.length });
+      }
+    }
+    if (!s.cwd && typeof o.cwd === 'string' && o.cwd) s.cwd = o.cwd;
+    // A path-scoped rule ATTACH is observable after all, on two records, both measured in the
+    // audit corpus: the harness writes a row whose `attachment.type` is `nested_memory` naming the
+    // rule file it just loaded (190 rows across the collection, 11 distinct rules), and
+    // guard-read-whole-file's shell-route reminder arrives as a `hook_additional_context`
+    // attachment naming the governing rule (157 rows, 10 distinct rules). Neither is inferred, so
+    // the glob proxy the report also prints is a FLOOR under them, never the only signal.
+    {
+      const ats = [];
+      if (o.attachment && typeof o.attachment === 'object') ats.push(o.attachment);
+      if (Array.isArray(o.attachments)) for (const a of o.attachments) if (a && typeof a === 'object') ats.push(a);
+      for (const at of ats) {
+        const bump = (ruleFile, key) => {
+          const e = s.ruleAttachments[ruleFile] || (s.ruleAttachments[ruleFile] = { records: 0, shellNotices: 0, firstTs: null });
+          e[key] += 1;
+          if (o.timestamp && (!e.firstTs || o.timestamp < e.firstTs)) e.firstTs = o.timestamp;
+        };
+        if (at.type === 'nested_memory') {
+          const p = String(at.displayPath || at.path || '').replace(/\\/g, '/');
+          const m = /(?:^|\/)\.claude\/rules\/([^/]+\.md)$/.exec(p);
+          if (m) bump(m[1], 'records');
+        } else if (at.type === 'hook_additional_context') {
+          const txt = Array.isArray(at.content) ? at.content.join('\n') : String(at.content || '');
+          // one notice can name its rule twice - the notice is the event, not each mention
+          const named = new Set([...txt.matchAll(/\.claude[\\/]rules[\\/]([A-Za-z0-9._-]+\.md)/g)].map((x) => x[1]));
+          for (const r of named) bump(r, 'shellNotices');
+        }
+      }
+    }
+    if (raw.includes(STYLE_RULE_MARKER)) s.styleRuleAttaches++;
+    if (raw.includes(STYLE_INJECT_MARKER)) s.styleInjections++;
+    if (o.timestamp) { if (!s.firstTs) s.firstTs = o.timestamp; s.lastTs = o.timestamp; }
+    if (!s.ccVersion && o.version) s.ccVersion = o.version;
+    // TWO records name the model, and they can DISAGREE: `cost-state.modelUsage` keys off the id
+    // the billing rows carry, while the session's own reminder names the id it was STARTED on
+    // (measured: a bundle whose cost-state said one tier and whose reminder said another - the
+    // report picked the wrong window and judged the fresh-session gate against the wrong number).
+    // Keep both and say which answered; the reminder is the session's own statement about itself.
+    if (!s.modelIdReminder) {
+      const mid = raw.match(/exact model ID is ([A-Za-z0-9._:@[\]-]+)/);
+      if (mid) s.modelIdReminder = mid[1].replace(/[.,'"`]+$/, '');
+    }
+    // An interrupt is the USER stopping the turn - it is not a tool error and not a hook block,
+    // and a session that ENDS on one ended by hand. Neither fact had a home in the report, so an
+    // abandoned run read as a completed one (measured: two rejected approvals, then the marker,
+    // then nothing - reported as a clean close).
+    if (raw.includes('[Request interrupted by user')) {
+      s.userInterrupts += 1;
+      if (o.timestamp) s.lastInterruptTs = o.timestamp;
+    }
+    // `cost-state` is a record in this same file, and it is the ONLY place two facts survive:
+    // the THINKING tokens (billed, attributable to no single message - 86,346 in one session, with
+    // all 116 thinking blocks empty, so spike residuals could never be closed), and the model id
+    // WITH its window suffix (`claude-opus-5[1m]`) - every assistant message strips it, and the
+    // fresh-session threshold is chosen by exactly that suffix.
+    if (o.type === 'cost-state' && o.modelUsage) {
+      // the record is CUMULATIVE and written more than once per session - take the largest,
+      // so a resume that restarts the counter cannot shrink the total
+      const think = Object.values(o.modelUsage).reduce((n, v) => n + ((v && v.thinkingTokens) || 0), 0);
+      if (think > s.thinkingTokens) s.thinkingTokens = think;
+      for (const id of Object.keys(o.modelUsage)) if (!s.modelIdsFull.includes(id)) s.modelIdsFull.push(id);
+      if (o.totalCostUSD != null && (s.totalCostUSD == null || o.totalCostUSD > s.totalCostUSD)) s.totalCostUSD = o.totalCostUSD;
+      // The bill's own totals: the harness's post-turn recap call (`away_summary`) is billed and
+      // written to no transcript row, so this is the only side that sees it.
+      const sum = (k) => Object.values(o.modelUsage).reduce((n, v) => n + ((v && v[k]) || 0), 0);
+      const cr = sum('cacheReadInputTokens');
+      if (!s.costState || cr > s.costState.cacheRead) s.costState = { cacheRead: cr, cacheCreate: sum('cacheCreationInputTokens'), input: sum('inputTokens'), output: sum('outputTokens') };
+    }
+    if (o.compactMetadata) {
+      compactMeta++;
+      // The metadata was read and only a COUNT was printed - 738,247 dropped tokens and 4m02s of
+      // wall clock discarded across one session's compactions, the single largest unexplained
+      // number in several reports.
+      const cm = o.compactMetadata;
+      const pre = cm.preTokens ?? cm.preCompactTokens ?? null;
+      const post = cm.postTokens ?? cm.postCompactTokens ?? null;
+      s.compactionEvents.push({
+        ts: o.timestamp || null,
+        pre,
+        post,
+        dropped: pre != null && post != null ? pre - post : null,
+        durationMs: cm.durationMs ?? cm.duration ?? null,
+        trigger: cm.trigger || null,
+      });
+      if (lastSkill) s.skillTimeline.push({ ts: o.timestamp || null, skill: null });
+      lastSkill = null;
+      openCompactionTracker(o.timestamp);
+    }
+    if (o.isCompactSummary) {
+      compactSummary++;
+      // a transcript generation with no boundary line: the summary is the only marker
+      if (compactMeta === 0) openCompactionTracker(o.timestamp);
+    }
+    // Record the context level each API error fired at - reports guessed at causes when
+    // errors clustered at high ctx (measured: 22 errors at ~200k ctx read as flakiness).
+    if (o.isApiErrorMessage) { s.apiErrors++; s.apiErrorEvents.push({ ts: o.timestamp || null, ctx: prevCtx }); }
+    // Count slash commands only from the session's OWN user turns - the old whole-line scan
+    // also matched markers quoted inside tool_result payloads (measured: a foreign session's
+    // /exit surfaced as this session's own invocation in two bundles), and a non-global
+    // match dropped every marker after the first on a line.
+    if (o.type === 'user' && o.message && raw.includes('<command-name>')) {
+      const own = typeof o.message.content === 'string' ? o.message.content
+        : Array.isArray(o.message.content) ? o.message.content.filter((c) => c.type === 'text').map((c) => c.text || '').join('\n') : '';
+      // A LEADING SPACE inside the tag suppressed the match, and a whole guided-command run then
+      // charged its ~2.75M to the previous command's window instead of appearing in the SKILLS
+      // table at all.
+      for (const m of own.matchAll(/<command-name>\s*\/?\s*([A-Za-z0-9_:-]+)\s*<\/command-name>/g)) {
+        s.commandInvocations[m[1]] = (s.commandInvocations[m[1]] || 0) + 1;
+        if (!s.commandFirstTs[m[1]]) s.commandFirstTs[m[1]] = o.timestamp || null;
+        if (lastSkill) s.skillTimeline.push({ ts: o.timestamp || null, skill: null });
+        lastSkill = null; // a new slash command ends the previous skill's carry-forward
+        // A slash command opens a companion window too: a reference skill loaded in its
+        // first messages serves the command, not a phase of its own (measured: a style
+        // skill loaded by a command's step charged as a standalone run).
+        // `/clear` is a harness reset, not a skill: opening a window for it parks the whole
+        // session's real work under a phantom `clear` row and glues the genuine skills onto it
+        // as companions (measured: 4 sessions, one with 62 of 71 messages mis-bucketed).
+        activeInvoke = m[1] === 'clear' ? null : { skill: m[1], msgs: 0 };
+        askSinceInvoke = false;
+        // A mid-file /clear starts a new working window: raw first->last spans across it
+        // read as a multi-day session at ~6% ledger coverage when the real work window was
+        // ~89 min at ~96% (measured) - record the boundary so printers can show both.
+        if (m[1] === 'clear' && o.timestamp) s.clearTs = o.timestamp;
+      }
+    }
+
+    if (o.type === 'assistant' && o.message) {
+      const m = o.message;
+      // usage: fold as max per field per message.id (duplicate lines repeat identical
+      // usage in main sessions but progressive streaming snapshots in subagent files)
+      if (m.usage && m.id && m.model !== '<synthetic>') {
+        if (o.attributionSkill) {
+          if (o.attributionSkill !== lastSkill) s.skillTimeline.push({ ts: o.timestamp || null, skill: o.attributionSkill });
+          lastSkill = o.attributionSkill;
+        }
+        let r = msgReg.get(m.id);
+        if (!r) {
+          r = { model: m.model, skill: o.attributionSkill || lastSkill || null, carried: !o.attributionSkill && !!lastSkill, foreign, u: { in: 0, cc: 0, cr: 0, out: 0 } };
+          msgReg.set(m.id, r);
+          if (activeInvoke) activeInvoke.msgs += 1;
+          // context size is fixed at message start, so first sighting is exact for spikes
+          const ctx = (m.usage.input_tokens || 0) + (m.usage.cache_read_input_tokens || 0) + (m.usage.cache_creation_input_tokens || 0);
+          // PEAK context, not just the last one: every threshold in the stack keys off the largest
+          // per-message context a session carried, and reports that quoted the final message
+          // understated it by 17-43% (10 confirmations).
+          if (ctx > s.peakCtx) { s.peakCtx = ctx; s.peakCtxAt = o.timestamp || null; }
+          // The COLD FLOOR: the smallest context any message carried is the standing inventory -
+          // system prompt, tool schemas, CLAUDE.md, the always-on rules - paid on every single
+          // message and re-paid in full after every compaction. Measured at 3.7%-86.8% of a
+          // session's cache-read and 23-48% of its own floor, and no report had a row for it.
+          if (ctx > 0 && (s.floorCtx === 0 || ctx < s.floorCtx)) s.floorCtx = ctx;
+          // Cache continuity, by Claude Code's OWN definition (its `Prompt cache (main)` status
+          // line): a request is a MISS when it re-processed more than 5% and at least 2,000 tokens
+          // of what the previous request had cached; the first request after a compaction is an
+          // EXPECTED rebuild, counted apart. What a miss cost is the tokens it wrote back.
+          if (ctx > 0) {
+            const cc = m.usage.cache_creation_input_tokens || 0;
+            const cr = m.usage.cache_read_input_tokens || 0;
+            if (prevCache && !foreign) {
+              const couldRead = prevCache.cr + prevCache.cc;
+              const reprocessed = Math.max(0, couldRead - cr);
+              if (couldRead > 0 && reprocessed > 0.05 * couldRead && reprocessed >= 2000) {
+                const e = s.efficiency;
+                if (afterCompaction) { e.expectedRebuilds += 1; e.expectedRebuildTokens += cc; }
+                else {
+                  e.cacheMisses += 1; e.cacheMissTokens += cc;
+                  if (e.cacheMissAt.length < 10) e.cacheMissAt.push({ ts: o.timestamp || null, reprocessed, recached: cc });
+                }
+              }
+            }
+            prevCache = { cr, cc };
+            afterCompaction = false;
+          }
+          if (prevCtx != null && ctx - prevCtx > 0) {
+            s.spikes.push({ ts: o.timestamp, delta: ctx - prevCtx, ctx, causes: summarizeCauses(pending) });
+          } else if (prevCtx != null && (m.usage.cache_creation_input_tokens || 0) > 20000) {
+            // Right after a compaction the context DROPS, so a re-cache of the rebuilt prompt has a
+            // negative delta and never entered the accumulator - 279,885 tokens, 17.2% of one
+            // session's whole cache-write, invisible. Keyed on the write itself, not the delta.
+            s.spikes.push({
+              ts: o.timestamp,
+              delta: m.usage.cache_creation_input_tokens || 0,
+              ctx,
+              kind: 'cache-write',
+              causes: summarizeCauses(pending) || 'prompt re-cached after a context reset',
+            });
+          }
+          s.spikes.sort((a, b) => b.delta - a.delta);
+          if (s.spikes.length > 5) s.spikes.length = 5;
+          prevCtx = ctx; pending = [];
+        }
+        r.u.in = Math.max(r.u.in, m.usage.input_tokens || 0);
+        r.u.cc = Math.max(r.u.cc, m.usage.cache_creation_input_tokens || 0);
+        r.u.cr = Math.max(r.u.cr, m.usage.cache_read_input_tokens || 0);
+        r.u.out = Math.max(r.u.out, m.usage.output_tokens || 0);
+        if (o.attributionSkill && (!r.skill || r.carried)) { r.skill = o.attributionSkill; r.carried = false; }
+      }
+      if (Array.isArray(m.content)) for (const c of m.content) {
+        if (c.type !== 'tool_use' || seenToolUse.has(c.id)) continue;
+        seenToolUse.add(c.id);
+        if (foreign) s.forkPrefix.toolCalls += 1;
+        else if (o.timestamp) { s.toolCallTs.push(o.timestamp); s.toolCallIdx.push({ ts: o.timestamp, tool: c.name }); }
+        const t = s.toolCalls[c.name] || (s.toolCalls[c.name] = { calls: 0, resultChars: 0, errors: 0, firstTs: o.timestamp || null });
+        t.calls += 1;
+        if (c.input && typeof c.input.file_path === 'string') {
+          const rel = docRelPath(c.input.file_path);
+          if (rel) {
+            const d = s.docTouches[rel] || (s.docTouches[rel] = { reads: 0, writes: 0 });
+            if (c.name === 'Read') d.reads += 1;
+            else if (['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(c.name)) d.writes += 1;
+          }
+        }
+        const info = { name: c.name };
+        toolSeq += 1;
+        {
+          // What the call READS, on both routes - the scorecard's build-dir and re-read rows.
+          const i = c.input || {};
+          let readTarget = null;
+          if (c.name === 'Read' && typeof i.file_path === 'string') readTarget = i.file_path;
+          else if (isShellTool(c.name) && typeof i.command === 'string') readTarget = shellReadTarget(maskHeredocs(i.command));
+          if (readTarget) {
+            info.readTarget = readTarget;
+            if (BUILD_DIR_RE.test(readTarget)) info.buildDir = true;
+            const cur = s.efficiency.compactionRereads[s.efficiency.compactionRereads.length - 1];
+            if (cur && cur.before.has(readTarget) && !cur.seen.has(readTarget)) { cur.seen.add(readTarget); info.reread = true; }
+            readPaths.add(readTarget);
+          }
+          // a dispatched seat may have run the check in its own transcript - the turn is covered
+          if (c.name === 'Agent' || c.name === 'Task') turnHadCheck = true;
+          // Every file the session TOUCHED, on both routes - the deterministic proxy for a
+          // path-scoped rule attach. A Read is both a file tool and a read target, so the two
+          // spellings are deduped before counting.
+          const touched = new Set();
+          if (['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(c.name) && (i.file_path || i.notebook_path)) touched.add(String(i.file_path || i.notebook_path));
+          if (readTarget) touched.add(readTarget);
+          for (const p of touched) {
+            const e = s.fileTouches[p] || (s.fileTouches[p] = { n: 0, firstTs: o.timestamp || null });
+            e.n += 1;
+          }
+        }
+        if (c.name === 'Skill' && c.input && c.input.skill) {
+          info.skill = c.input.skill;
+          const sk = s.skillInvocations[c.input.skill] || (s.skillInvocations[c.input.skill] = { calls: 0, injectedChars: 0, firstTs: o.timestamp || null });
+          sk.calls += 1;
+          if (activeInvoke && activeInvoke.skill !== c.input.skill && activeInvoke.msgs <= 5 && !askSinceInvoke) {
+            if (!companionOf[c.input.skill]) companionOf[c.input.skill] = activeInvoke.skill;
+          } else {
+            activeInvoke = { skill: c.input.skill, msgs: 0 };
+            askSinceInvoke = false;
+          }
+        } else if (c.name.startsWith('mcp__')) {
+          const server = c.name.split('__')[1] || '?';
+          const mc = s.mcp[server] || (s.mcp[server] = { calls: 0, resultChars: 0, errors: 0, tools: {}, firstTs: o.timestamp || null });
+          mc.calls += 1;
+          const tool = c.name.split('__').slice(2).join('__') || '?';
+          mc.tools[tool] = (mc.tools[tool] || 0) + 1;
+        } else if ((c.name === 'Agent' || c.name === 'Task') && c.input) {
+          s.agentDispatches.push({ id: c.id, desc: c.input.description || null, subagentType: c.input.subagent_type || null, ts: o.timestamp || null });
+        }
+        if (isShellTool(c.name) && c.input && typeof c.input.command === 'string') {
+          const cmdStr = c.input.command;
+          // Deterministic counters the report's protocol sweeps previously had no number for
+          // (measured: '0 git commits' shipped against 3 commits + a PR merge; occurrence
+          // counting, not per-call, since one Bash call can carry two commits).
+          // A heredoc body is DATA: a plan file or receipt that merely describes `git commit`
+          // is not an invocation. Counting it reported 13 commits where 8 ran, 4 where 1 ran,
+          // and 4 where NONE ran (measured across 3 bundles) - blank the payload before counting.
+          const cmdShell = maskHeredocs(cmdStr);
+          // The COUNTERS need the quoted spans gone too, and the match has to OPEN a segment: every
+          // phantom commit in the corpus was a quoted string, one of them inside a command the
+          // harness had DENIED (worst case: 12 commits reported against 0 real). Held until the
+          // paired tool_result proves the call ran, the same way the doc touches are.
+          const cmdCode = maskQuoted(cmdShell);
+          const check = classifyCheck(cmdCode, cmdShell);
+          if (check) {
+            info.check = check.kind; info.scoped = check.scoped;
+            lastCheckSeq = toolSeq; turnHadCheck = true;
+            const k = s.efficiency.checks[check.kind];
+            k.calls += 1;
+            if (check.kind === 'test') { if (check.scoped) k.scoped += 1; else k.whole += 1; }
+          }
+          const commits = (cmdCode.match(/(?:^|[;&|(]\s*)git\s+(?:-[\w-]+(?:[= ]\S+)?\s+)*commit\b/g) || []).length;
+          const merges = (cmdCode.match(/(?:^|[;&|(]\s*)gh\s+pr\s+merge\b/g) || []).length;
+          if (commits || merges) pendingGitActs.set(c.id, { commits, merges, checked: lastCheckSeq >= 0 && toolSeq - lastCheckSeq <= CHECK_WINDOW, ts: o.timestamp || null });
+          // Doc traffic routed through Bash (heredocs, printf >, rm -f) is real doc I/O the
+          // Write/Edit-only counter missed - a receipt written+cleared via Bash showed
+          // writes:0, and batched python doc writes showed writes:0 across 3 rewrites (measured).
+          // Classified PER OCCURRENCE against its own command segment, write only when the
+          // redirect/rm/tee TARGETS that path, once per call per doc - the whole-command
+          // check stamped every doc in a `cat A && rm B` as written, counted a `2>/dev/null`
+          // as the write signal, and re-counted one doc per prose mention (measured: a
+          // single receipt write reported as 5 writes across 2 docs).
+          {
+            // A write the harness DENIED never happened: the classifier-blocked attempts still
+            // counted, reporting 3 writes where 1 executed (measured). The result for this call
+            // decides - an is_error result means nothing was written.
+            const touched = new Map();
+            const roots = bashDocRoots();
+            const rootAlt = roots.map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+            const docPathRe = new RegExp(`(?:^|[\\s"'\`=(])((?:[^\\s"'\`;|&)]*/)?(?:${rootAlt})[^\\s"'\`;|&)]+)`, 'g');
+            for (const seg of cmdShell.split(/&&|\|\||;|\n/)) {
+              for (const pm of seg.matchAll(docPathRe)) {
+                const p = pm[1].replace(/[/:,.]+$/, ''); // a trailing separator is punctuation, not the name
+                if (p.includes('$')) continue; // unexpanded variable - not a literal doc path
+                if (/[*?\[]/.test(p)) continue; // a GLOB names no one document
+                const hit = roots.find((r) => p.includes(r));
+                if (!hit) continue;
+                const rel = p.slice(p.indexOf(hit) + hit.length);
+                // Only a DOCUMENT: keying on every token under the docs root produced 79 rows for
+                // ~6 real documents - directories, globs and trailing punctuation each got a row.
+                if (!rel || !/\.md$/i.test(rel)) continue;
+                // An ASSIGNMENT is neither a read nor a write; it was counted as a read in 35 of 72
+                // occurrences. Only the varWrite check below can turn a binding into a write.
+                const assigned = pm[0][0] === '=';
+                const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                // A python write reaches the file three ways and only one names the path inside
+                // open(): `open("<path>","w")`, `p = "<path>" ... open(p,"w")`, and
+                // `Path("<path>").write_text(...)`. Counting only the first read a real write as a
+                // READ in 3 audited bundles (a doc reported 0 writes against 6 real edits), so the
+                // variable binding and the pathlib form are matched too.
+                // The binding and its use sit on DIFFERENT lines of a python heredoc, so both
+                // checks run against the whole command, not the segment the path appeared in.
+                const varBound = new RegExp(`(\\w+)\\s*=\\s*(?:pathlib\\.)?(?:Path\\()?["'\`][^"'\`]*${esc}`).exec(cmdStr);
+                const varWrite = varBound
+                  ? new RegExp(`open\\(\\s*${varBound[1]}\\s*,[^)]*["']w["']|\\b${varBound[1]}\\.write_(text|bytes)\\(|\\bio\\.open\\(\\s*${varBound[1]}\\s*,[^)]*["']w["']`).test(cmdStr)
+                  : false;
+                // `rm` CLEARS a receipt - counting it as a write reported a written document that
+                // was in fact deleted; and `mkdir -p <dir>` is neither read nor write of a document.
+                const cleared = new RegExp(`\\brm\\s+(?:-\\w+\\s+)*["']?${esc}`).test(seg);
+                const made = new RegExp(`\\bmkdir\\s+(?:-\\w+\\s+)*["']?${esc}`).test(seg);
+                const isWrite = varWrite || new RegExp(`(>>?\\s*["']?${esc})|(\\btee\\s+(?:-a\\s+)?["']?${esc})|(open\\([^)]*${esc}[^)]*["']w["'])|(${esc}["'\`]?\\s*\\)?\\.write_(text|bytes)\\()`).test(seg);
+                const e = touched.get(rel) || { r: false, w: false, c: false };
+                if (isWrite) e.w = true;
+                else if (cleared) e.c = true;
+                else if (!made && !assigned) e.r = true;
+                touched.set(rel, e);
+              }
+            }
+            // Held until the paired tool_result proves the command actually ran (below).
+            if (touched.size) pendingDocTouch.set(c.id, [...touched.entries()]);
+          }
+        }
+        if (c.name === 'AskUserQuestion') askSinceInvoke = true;
+        // What the call was FOR, in the call's own words - the Bash description the model wrote,
+        // the file a Read named, the seat a dispatch went to. The report used to print result
+        // SIZES with no call beside them, so whoever wrote it hand-mapped char counts back onto
+        // calls by eye (measured: eight results re-derived by hand for one bundle's report).
+        info.label = (() => {
+          const i = c.input || {};
+          if (isShellTool(c.name)) return String(i.description || i.command || '').replace(/\s+/g, ' ').slice(0, 70);
+          if (i.file_path || i.notebook_path) return String(i.file_path || i.notebook_path).split(/[/\\]/).pop();
+          if (c.name === 'Agent' || c.name === 'Task') return [i.subagent_type, i.description].filter(Boolean).join(': ').slice(0, 70);
+          if (c.name === 'Skill') return String(i.skill || '');
+          if (i.pattern) return String(i.pattern).slice(0, 70);
+          if (i.query) return String(i.query).slice(0, 70);
+          if (c.name.startsWith('mcp__')) return c.name.split('__').slice(2).join('__');
+          return '';
+        })();
+        toolById.set(c.id, info);
+        lastToolName = c.name;
+      }
+      // The ANSWER side of the scorecard: green claims, long answers, and the assistant half of the
+      // correction-streak view. One API message arrives as several rows; they merge by message.id.
+      if (!foreign && m.model !== '<synthetic>' && Array.isArray(m.content)) {
+        const txt = m.content.filter((b) => b && b.type === 'text').map((b) => b.text || '').join('\n');
+        if (txt) msgText.set(m.id, (msgText.get(m.id) || '') + '\n' + txt);
+        const len = proseOf(txt).length;
+        const prev = turns[turns.length - 1];
+        if (m.id && m.id === lastAsstId && prev && prev.role === 'assistant') prev.len += len;
+        else turns.push({ role: 'assistant', len });
+        lastAsstId = m.id || null;
+        if (m.stop_reason === 'end_turn') {
+          const prose = proseOf(msgText.get(m.id) || '');
+          if (prose) {
+            const e = s.efficiency;
+            e.finalAnswers += 1;
+            if (prose.length > LONG_ANSWER) e.longAnswers += 1;
+            if (claimsGreen(prose)) { e.greenClaims += 1; if (!turnHadCheck) e.unverifiedGreenClaims.push(o.timestamp || null); }
+          }
+          msgText.delete(m.id);
+        }
+      }
+      const hasToolUse = Array.isArray(m.content) && m.content.some((c) => c.type === 'tool_use');
+      if (hasToolUse) prevAssistantNoTool = null;
+      else if (m.stop_reason === 'end_turn') prevAssistantNoTool = o.timestamp || prevAssistantNoTool;
+    }
+
+    if (o.type === 'user' && o.message) {
+      const content = o.message.content;
+      // Harness-injected user turns (task notifications, system reminders) are not the
+      // person typing: counting them inflated userPrompts and manufactured unheld-stop
+      // candidates out of background-task completions (measured: a clean session reported
+      // 1 candidate whose 'user turn' was a task-notification landing after the close).
+      // The harness's own UserPromptSubmit hook already implements the right discriminator, and it
+      // is a POSITIVE one: origin.kind === 'human'. Counting by exclusion list inflated the prompt
+      // count by up to 500% across 12 bundles - it missed <command-name>, <local-command-stdout>,
+      // isCompactSummary, and the sibling records one typed turn produces. The list stays as the
+      // fallback for a transcript generation that carries no origin, and it is only as good as its
+      // enumeration: <local-command-caveat> (117 occurrences in the 489-transcript audit corpus)
+      // and <fork-boilerplate> were still missing, each one manufacturing a free-text user turn -
+      // which is what an unheld-stop candidate is built from (285 candidates across that corpus).
+      const isInjectedText = (txt) => (o.origin
+        ? o.origin.kind !== 'human'
+        : /^\s*<(task-notification|system-reminder|teammate-message|background-task|command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|fork-boilerplate)\b/.test(txt))
+        || o.isCompactSummary === true;
+      // One typed turn can emit several user records sharing a parentUuid (the command marker, its
+      // message, its stdout). The first one counts; the rest are the same turn.
+      const firstOfTurn = () => {
+        if (!o.parentUuid) return true;
+        if (promptParents.has(o.parentUuid)) return false;
+        promptParents.add(o.parentUuid);
+        return true;
+      };
+      if (typeof content === 'string') {
+        // A Stop-hook denial arrives as an isMeta user STRING with no tool_result, so it is
+        // structurally invisible to the is_error path below: one report printed 'Hook blocks - 4'
+        // against 6 and then named both Stop blocks two paragraphs later.
+        if (/^\s*Stop hook feedback:/.test(content)) {
+          s.stopHookBlocks = (s.stopHookBlocks || 0) + 1;
+          attributeDenial(content, o.timestamp);
+        }
+        if (!o.isMeta && !isInjectedText(content) && firstOfTurn()) {
+          s.userPrompts++;
+          onHumanTurn(content, o.timestamp);
+          if (prevAssistantNoTool) { s.unheldStopCandidates.push({ stopTs: prevAssistantNoTool, userTs: o.timestamp || null }); prevAssistantNoTool = null; }
+        }
+        return;
+      }
+      if (!Array.isArray(content)) return;
+      // A Skill call's tool_result is a tiny stub; the skill BODY lands as an isMeta text
+      // injection right after it. Without this a spike's cause line credited the ~18-token
+      // stub while the ~4k-token body drove the jump (measured: cause off by 2 orders).
+      if (o.isMeta && lastToolName === 'Skill') {
+        const bodyChars = content.filter((c) => c.type === 'text').reduce((n, c) => n + (c.text || '').length, 0);
+        if (bodyChars > 500) pending.push({ name: 'skill-body', chars: bodyChars });
+      }
+      let hasResult = false;
+      for (const c of content) {
+        if (c.type !== 'tool_result') continue;
+        hasResult = true;
+        // An image block is base64: measuring it as text put a shipped report's headline cost
+        // 46x over the truth (353.2k claimed vs 7,756 actually billed, read off the next turn's
+        // cache_creation). Images are counted separately and never enter the chars/4 estimate.
+        const parts = Array.isArray(c.content) ? c.content : null;
+        const imgs = parts ? parts.filter((b) => b && b.type === 'image').length : 0;
+        const textParts = parts ? parts.filter((b) => !b || b.type !== 'image') : c.content;
+        const text = typeof textParts === 'string' ? textParts : JSON.stringify(textParts || '');
+        const chars = text.length;
+        if (imgs) s.imageResults = (s.imageResults || 0) + imgs;
+        const info = toolById.get(c.tool_use_id);
+        pending.push({ name: info ? info.name : '?', chars });
+        if (!info) continue;
+        // The biggest individual results, joined to what the call asked for. Kept sorted and
+        // capped, so this costs nothing on a long session.
+        s.topResults.push({ name: info.name, label: info.label || '', chars, ts: o.timestamp || null, error: !!c.is_error });
+        s.topResults.sort((a, b) => b.chars - a.chars);
+        if (s.topResults.length > 12) s.topResults.length = 12;
+        const t = s.toolCalls[info.name];
+        // A PreToolUse guard denial is the gate WORKING, not a tool failure - bucketing them
+        // as errors made reports call a working gate 'the session's weak point' (measured in
+        // three bundles: 124/132, 14/14 and 15/15 'Read errors' were all guard blocks).
+        // Match the whole guard family by its shared 'Blocked' word - enumerating two messages
+        // missed the commit/rm/force-push variants and split one session's denials into 22
+        // 'errors' + 12 blocks when all 34 were gate denials (measured). The COLON is not part of
+        // the contract, and the ["…/hooks/*.js"] bracket is attribution, not the test.
+        //
+        // But 'Blocked' and 'Do NOT retry' are the HARNESS's words too, and matching them bare
+        // charged three classes of non-stack denial to the guards. Measured over the 489-transcript
+        // audit corpus: 90 real stack blocks (all carrying the PreToolUse guard bracket), against
+        // 11 auto-mode-classifier denials ('Blocked by classifier', `toolDenialKind:
+        // "automode-blocked"`), 3 harness foreground-`sleep` blocks (no stack hook blocks sleep)
+        // and 2 AskUserQuestion schema failures whose own text says 'Do not retry this call' -
+        // 16 events filed against guards that never ran, one of them as a phantom
+        // `denialsByHook: {"(unattributed)": 1}`. Excluded by their own signatures, and COUNTED as
+        // harness denials so the separation is visible rather than a silent drop.
+        const harnessDenial =
+          o.toolDenialKind === 'automode-blocked' ||        // the auto-mode classifier
+          o.toolDenialKind === 'user-rejected' ||           // the user's own no (also caught below as a decline)
+          /denied by the Claude Code auto mode classifier/i.test(text) ||
+          /\bInputValidationError\b/.test(text) ||          // a tool-schema failure, never a PreToolUse event
+          /Blocked: sleep\b/.test(text);                    // the Bash tool's own foreground-sleep block
+        const readsAsBlock = c.is_error && (/\bBlocked\b/.test(text) || /\bDo NOT retry\b/i.test(text));
+        const isHookBlock = readsAsBlock && !harnessDenial;
+        if (isHookBlock) attributeDenial(text, o.timestamp);
+        else if (readsAsBlock) s.harnessDenials = (s.harnessDenials || 0) + 1;  // reads as a block, is the harness's
+        const held = pendingDocTouch.get(c.tool_use_id);
+        if (held) {
+          pendingDocTouch.delete(c.tool_use_id);
+          for (const [rel, e] of held) {
+            // An occurrence that classified as NOTHING - a bare `VAR=<path>` binding, a `mkdir` of
+            // its directory - must not open a row: an all-zero row is one of the 79 the report
+            // printed for ~6 real documents.
+            if (!e.w && !e.c && !e.r) continue;
+            const d = s.docTouches[rel] || (s.docTouches[rel] = { reads: 0, writes: 0 });
+            if (e.w && !c.is_error) d.bashWrites = (d.bashWrites || 0) + 1;
+            else if (e.w && c.is_error) d.bashWritesDenied = (d.bashWritesDenied || 0) + 1;
+            if (e.c && !c.is_error) d.cleared = (d.cleared || 0) + 1;
+            if (e.r && !e.w && !e.c) d.bashReads = (d.bashReads || 0) + 1;
+          }
+        }
+        const acts = pendingGitActs.get(c.tool_use_id);
+        if (acts) {
+          pendingGitActs.delete(c.tool_use_id);
+          if (!c.is_error) {
+            s.gitCommits += acts.commits; s.prMerges += acts.merges;
+            // A commit is CHECKED when a test / build / lint / ci-status call sat within the window
+            // before it (ran - not necessarily green; the report opens the run). One Bash call
+            // carrying the check and the commit counts as checked.
+            if (acts.commits) {
+              if (acts.checked) s.efficiency.commitsChecked += acts.commits;
+              else s.efficiency.commitsUnchecked.push(acts.ts || o.timestamp || null);
+            }
+          }
+        }
+        {
+          const e = s.efficiency;
+          if (info.buildDir && info.readTarget) {
+            e.buildDirReads.calls += 1; e.buildDirReads.chars += chars;
+            e.buildDirReads.paths[info.readTarget] = (e.buildDirReads.paths[info.readTarget] || 0) + chars;
+          }
+          if (info.reread) { const cur = e.compactionRereads[e.compactionRereads.length - 1]; if (cur) { cur.files += 1; cur.chars += chars; } }
+          if (info.check) e.checks[info.check].chars += chars;
+        }
+        // A DECLINE is the user answering the question, not a tool failure: reports read
+        // "The user doesn't want to proceed" as an error and called a working ask a weak point.
+        const isDecline = c.is_error && /\buser (?:doesn'?t want to proceed|declined|chose not)\b/i.test(text);
+        if (t) {
+          t.resultChars += chars;
+          if (isHookBlock) t.hookBlocks = (t.hookBlocks || 0) + 1;
+          else if (isDecline) t.declines = (t.declines || 0) + 1;
+          else if (c.is_error) {
+            t.errors += 1;
+            // WHEN each error happened, so the report attributes it to the phase that actually ran
+            // then. Measured: two errors at 06:57 were reported as the browser phase's, and the
+            // browser work did not start until ~07:2x - a whole phase blamed for someone else's.
+            if (o.timestamp) (t.errorTs = t.errorTs || []).push(o.timestamp);
+          }
+        }
+        if (info.skill) s.skillInvocations[info.skill].injectedChars += chars;
+        if (info.name.startsWith('mcp__')) {
+          const mc = s.mcp[info.name.split('__')[1] || '?'];
+          // The same carve-out the tool tally makes above: a user declining an MCP-driven ask is an
+          // answer, not a server failure, and counting it inflated the error rate of a working server.
+          if (mc) { mc.resultChars += chars; if (c.is_error && !isDecline) mc.errors += 1; }
+        }
+      }
+      const textJoined = content.filter((c) => c.type === 'text').map((c) => c.text || '').join('\n');
+      if (/^\s*Stop hook feedback:/.test(textJoined)) {
+        s.stopHookBlocks = (s.stopHookBlocks || 0) + 1;
+        attributeDenial(textJoined, o.timestamp);
+      }
+      if (!hasResult && !o.isMeta && textJoined.trim() && !isInjectedText(textJoined) && firstOfTurn()) {
+        s.userPrompts++;
+        onHumanTurn(textJoined, o.timestamp);
+        if (prevAssistantNoTool) { s.unheldStopCandidates.push({ stopTs: prevAssistantNoTool, userTs: o.timestamp || null }); prevAssistantNoTool = null; }
+      }
+    }
+  });
+
+  // finalize the folded per-message usage into the tallies; companion skills fold into
+  // their parent (resolved transitively) so a nested reference load never steals the run
+  const resolveParent = (k) => { const seen = new Set(); while (companionOf[k] && !seen.has(k)) { seen.add(k); k = companionOf[k]; } return k; };
+  const carryRun = {};
+  for (const r of msgReg.values()) {
+    const u = { input_tokens: r.u.in, cache_creation_input_tokens: r.u.cc, cache_read_input_tokens: r.u.cr, output_tokens: r.u.out };
+    addUsage(s.total, u);
+    if (r.foreign) { s.forkPrefix.msgs += 1; s.forkPrefix.cacheRead += r.u.cr; s.forkPrefix.cacheCreate += r.u.cc; s.forkPrefix.output += r.u.out; }
+    addUsage(s.byModel[r.model] || (s.byModel[r.model] = newTally()), u);
+    if (r.skill) {
+      const eff = resolveParent(r.skill);
+      const a = s.skillAttribution[eff] || (s.skillAttribution[eff] = { msgs: 0, output: 0, cacheRead: 0, carriedMsgs: 0 });
+      a.msgs += 1; a.output += r.u.out; a.cacheRead += r.u.cr;
+      if (eff !== r.skill) { a.companionMsgs = (a.companionMsgs || 0) + 1; a.companionOut = (a.companionOut || 0) + r.u.out; }
+      if (r.carried) {
+        a.carriedMsgs = (a.carriedMsgs || 0) + 1;
+        carryRun[eff] = (carryRun[eff] || 0) + 1;
+        // A long unbroken carry is a stale stamp absorbing later phases, not the named
+        // skill's cost (measured: one stamp froze across 2 full cycles / 1h42m) - surface
+        // it so reports flag instead of charging it.
+        if (carryRun[eff] > (a.maxCarryRun || 0)) a.maxCarryRun = carryRun[eff];
+      } else carryRun[eff] = 0;
+    }
+  }
+  s.companionOf = companionOf;
+  s.compactions = compactMeta > 0 ? compactMeta : compactSummary;
+  s.efficiency.compactionRereads = s.efficiency.compactionRereads.map((c) => ({ ts: c.ts, candidates: c.before.size, files: c.files, chars: c.chars }));
+  // The bill sees calls the transcript never records - the harness's post-turn recap is one - so
+  // cost-state cache-read exceeds the transcript's by whole contexts (measured: 694,773 vs 590,045,
+  // a gap of exactly one peak context). Say so, or the bundle never reconciles to its bill and the
+  // gap gets blamed on the tools.
+  if (s.costState && s.costState.cacheRead > s.total.cacheRead) {
+    const gap = s.costState.cacheRead - s.total.cacheRead;
+    s.untranscribed = { cacheRead: gap, contexts: s.peakCtx ? Math.round((10 * gap) / s.peakCtx) / 10 : null };
+  }
+  return s;
+}
+
+function summarizeCauses(pending) {
+  const by = {};
+  for (const p of pending) {
+    const e = by[p.name] || (by[p.name] = { n: 0, chars: 0 });
+    e.n += 1; e.chars += p.chars;
+  }
+  return Object.entries(by).sort((a, b) => b[1].chars - a[1].chars).slice(0, 3)
+    .map(([name, e]) => `${name}×${e.n} (~${fmt(approxTok(e.chars))} tok)`).join(', ');
+}
+
+// ---------- subagents (the session's <id>/subagents/ directory) ----------
+
+async function analyzeSubagents(sessionFile, window) {
+  // Native layout: <sid>.jsonl + <sid>/subagents/. Audit bundles (what the
+  // project-stack-usage-analyzer skill archives) put subagents/ as a SIBLING of the
+  // transcript - without the fallback a bundle re-analysis silently drops every seat.
+  // Workflow-tool fan-outs nest under subagents/workflows/<wf-id>/agent-*.jsonl - a flat
+  // scan silently dropped 703 transcripts (~35% of output) across two audited bundles,
+  // so recurse (bounded) and tag each nested entry with its group.
+  let dir = path.join(sessionFile.replace(/\.jsonl$/, ''), 'subagents');
+  if (!fs.existsSync(dir)) dir = path.join(path.dirname(sessionFile), 'subagents');
+  if (!fs.existsSync(dir)) return [];
+  const out = [];
+  const walk = async (d, group, depth) => {
+    for (const f of fs.readdirSync(d)) {
+      const full = path.join(d, f);
+      let st;
+      try { st = fs.statSync(full); } catch { continue; }
+      if (st.isDirectory()) {
+        if (depth < 2) await walk(full, group ? `${group}/${f}` : f, depth + 1);
+        continue;
+      }
+      if (!f.endsWith('.jsonl')) continue;
+      let meta = {};
+      try { meta = JSON.parse(fs.readFileSync(path.join(d, f.replace(/\.jsonl$/, '.meta.json')), 'utf8')); } catch { /* meta optional */ }
+      if (group && !meta.agentType) meta.agentType = 'workflow-subagent';
+      const t = await analyzeTranscript(full, window);
+      if (window && t.total.msgs === 0) continue; // dispatched entirely outside the window
+      out.push({ id: f.replace(/^agent-|\.jsonl$/g, ''), group: group || null, meta, stats: t });
+    }
+  };
+  await walk(dir, null, 0);
+  return out;
+}
+
+// ---------- hook-log join ----------
+
+async function analyzeHookLog(file) {
+  const byTool = {}; let rows = 0; let firstTs = null; let lastTs = null;
+  const rowsIdx = [];   // { ts, tool } per row - the per-side join needs the rows, not their count
+  await readJsonl(file, (o) => {
+    if (!o.tool) return;
+    rows++;
+    if (o.ts) { if (!firstTs || o.ts < firstTs) firstTs = o.ts; if (!lastTs || o.ts > lastTs) lastTs = o.ts; rowsIdx.push({ ts: o.ts, tool: o.tool }); }
+    const t = byTool[o.tool] || (byTool[o.tool] = { calls: 0, details: {} });
+    t.calls += 1;
+    if (o.detail) t.details[o.detail] = (t.details[o.detail] || 0) + 1;
+  });
+  return { rows, byTool, firstTs, lastTs, rowsIdx };
+}
+
+// ---------- report ----------
+
+function tallyRow(label, t) {
+  return `  ${pad(label, 22)} ${rpad(fmt(t.input), 8)} ${rpad(fmt(t.cacheCreate), 11)} ${rpad(fmt(t.cacheRead), 11)} ${rpad(fmt(t.output), 8)} ${rpad(t.msgs, 6)} ${rpad(fmt(ctxOf(t)), 8)}`;
+}
+
+const CTX_WARN = 120000; // avg ctx/msg above this = the conversation, not the tools, is the cost
+
+// One aggregation, two renderers (text + markdown) - the numbers can never diverge by printer.
+function computeAggregates(main, agents) {
+  const agentTotal = newTally();
+  const byType = {};
+  for (const a of agents) {
+    mergeTally(agentTotal, a.stats.total);
+    const type = a.meta.agentType || '(unknown)';
+    const g = byType[type] || (byType[type] = { n: 0, tally: newTally(), tools: {}, descs: [], wall: 0, span: 0, seatMs: 0, intervals: [], firstTs: null, lastTs: null });
+    g.n += 1; mergeTally(g.tally, a.stats.total);
+    for (const [name, t] of Object.entries(a.stats.toolCalls)) g.tools[name] = (g.tools[name] || 0) + t.calls;
+    if (a.meta.description && g.descs.length < 2) g.descs.push(a.meta.description);
+    if (a.stats.firstTs && a.stats.lastTs) {
+      g.seatMs += new Date(a.stats.lastTs) - new Date(a.stats.firstTs);
+      g.intervals.push([Date.parse(a.stats.firstTs), Date.parse(a.stats.lastTs)]);
+      if (!g.firstTs || a.stats.firstTs < g.firstTs) g.firstTs = a.stats.firstTs;
+      if (!g.lastTs || a.stats.lastTs > g.lastTs) g.lastTs = a.stats.lastTs;
+    }
+  }
+  // wall = the union of the group's seat intervals, NOT the outer span and NOT summed seat
+  // durations - the summed form overstated a 10-seat parallel fan-out 3x, and the outer
+  // span read two 10-minute waves dispatched 4h apart as a 4h11m wall (both measured).
+  // span (outer first -> last) is kept so the printer can flag multi-wave groups.
+  for (const g of Object.values(byType)) {
+    if (!g.intervals.length) continue;
+    g.intervals.sort((x, y) => x[0] - y[0]);
+    let wall = 0; let [cs, ce] = g.intervals[0];
+    for (const [st, en] of g.intervals.slice(1)) {
+      if (st <= ce) ce = Math.max(ce, en);
+      else { wall += ce - cs; cs = st; ce = en; }
+    }
+    g.wall = wall + (ce - cs);
+    g.span = Date.parse(g.lastTs) - Date.parse(g.firstTs);
+  }
+  const grand = newTally(); mergeTally(grand, main.total); mergeTally(grand, agentTotal);
+
+  const skillSet = new Set([...Object.keys(main.skillInvocations), ...Object.keys(main.skillAttribution)]);
+  for (const a of agents) for (const k of [...Object.keys(a.stats.skillInvocations), ...Object.keys(a.stats.skillAttribution)]) skillSet.add(k);
+  const skillRows = [...skillSet].sort().map((k) => {
+    const inv = { calls: 0, injectedChars: 0 };
+    for (const src of [main, ...agents.map((a) => a.stats)]) {
+      if (src.skillInvocations[k]) { inv.calls += src.skillInvocations[k].calls; inv.injectedChars += src.skillInvocations[k].injectedChars; }
+    }
+    const mAttr = main.skillAttribution[k] || { msgs: 0, output: 0, cacheRead: 0, carriedMsgs: 0 };
+    const sub = { msgs: 0, output: 0, cacheRead: 0, types: {} };
+    for (const a of agents) {
+      const sa = a.stats.skillAttribution[k];
+      if (!sa) continue;
+      sub.msgs += sa.msgs; sub.output += sa.output; sub.cacheRead += sa.cacheRead || 0;
+      const ty = a.meta.agentType || '(unknown)';
+      sub.types[ty] = (sub.types[ty] || 0) + 1;
+    }
+    // A companion's own cost is folded into the skill that loaded it, so its row would read
+    // `0 msgs / 0 output` for a run that provably happened - measured, and read by an audit as
+    // 'the skill did not run'. Name the row it was folded into instead of printing the zero.
+    const folded = (() => {
+      const map = main.companionOf || {};
+      const seen = new Set();
+      let cur = map[k] || null;
+      while (cur && map[cur] && !seen.has(cur)) { seen.add(cur); cur = map[cur]; }
+      return cur;
+    })();
+    return { skill: k, cmd: main.commandInvocations[k] || 0, inv, mAttr, sub, folded };
+  });
+  // Seats whose transcripts carry no skill stamp are real dispatch cost the SKILLS rows
+  // cannot show - name them so an undercount reads as coverage, never as fewer dispatches.
+  // A seat with its OWN Skill invocations is not stampless (its calls show in the rows) -
+  // counted separately; for the truly stampless, the main session's stamp timeline at the
+  // seat's dispatch moment gives a suggestion the report may cite as inferred, never charge.
+  const unattributed = { n: 0, types: {}, selfInvoked: 0, guesses: {} };
+  const tl = main.skillTimeline || [];
+  for (const a of agents) {
+    if (Object.keys(a.stats.skillAttribution).length) continue;
+    if (Object.keys(a.stats.skillInvocations).length) { unattributed.selfInvoked += 1; continue; }
+    unattributed.n += 1;
+    const ty = a.meta.agentType || '(unknown)';
+    unattributed.types[ty] = (unattributed.types[ty] || 0) + 1;
+    if (a.stats.firstTs) {
+      let guess = null;
+      for (const e of tl) {
+        if (!e.ts || e.ts > a.stats.firstTs) break;
+        guess = e.skill;
+      }
+      if (guess) unattributed.guesses[guess] = (unattributed.guesses[guess] || 0) + 1;
+    }
+  }
+
+  const docRows = {};
+  let inject = main.styleInjections;
+  let attach = main.styleRuleAttaches;
+  for (const [rel, d] of Object.entries(main.docTouches)) {
+    const r = docRows[rel] || (docRows[rel] = { main: 0, agents: 0, writes: 0, bashReads: 0, bashWrites: 0 });
+    r.main += d.reads; r.writes += d.writes; r.bashReads += d.bashReads || 0; r.bashWrites += d.bashWrites || 0;
+  }
+  for (const a of agents) {
+    inject += a.stats.styleInjections;
+    attach += a.stats.styleRuleAttaches;
+    for (const [rel, d] of Object.entries(a.stats.docTouches)) {
+      const r = docRows[rel] || (docRows[rel] = { main: 0, agents: 0, writes: 0, bashReads: 0, bashWrites: 0 });
+      r.agents += d.reads; r.writes += d.writes; r.bashReads += d.bashReads || 0; r.bashWrites += d.bashWrites || 0;
+    }
+  }
+
+  const mcpServers = {};
+  for (const src of [main, ...agents.map((a) => a.stats)]) {
+    for (const [server, m] of Object.entries(src.mcp)) {
+      const e = mcpServers[server] || (mcpServers[server] = { calls: 0, resultChars: 0, errors: 0, tools: {} });
+      e.calls += m.calls; e.resultChars += m.resultChars; e.errors += m.errors;
+      for (const [t, n] of Object.entries(m.tools)) e.tools[t] = (e.tools[t] || 0) + n;
+    }
+  }
+
+  const tools = {};
+  for (const src of [main, ...agents.map((a) => a.stats)]) {
+    for (const [name, t] of Object.entries(src.toolCalls)) {
+      const e = tools[name] || (tools[name] = { calls: 0, resultChars: 0, errors: 0, hookBlocks: 0, declines: 0, errorTs: [] });
+      e.calls += t.calls; e.resultChars += t.resultChars; e.errors += t.errors; e.hookBlocks += t.hookBlocks || 0;
+      e.declines += t.declines || 0;
+      if (t.errorTs) e.errorTs = e.errorTs.concat(t.errorTs).sort();
+    }
+  }
+
+  // Dispatch overhead: how much of each seat's input was re-sending its OWN first-message context
+  // (CLAUDE.md, the rules, the skills its frontmatter preloads - measured 26k-70k chars of skills
+  // alone per designer / implementer / verifier seat) rather than the work. A seat over 60% bought
+  // little per dispatch; a one-message seat is 100% by construction and says so.
+  const dispatchOverhead = { seats: 0, heavy: 0, preloadTokens: 0, seatInputTokens: 0, heavySeats: [] };
+  for (const a of agents) {
+    const st = a.stats;
+    const inTok = st.total.cacheRead + st.total.input + st.total.cacheCreate;
+    if (!st.total.msgs || !inTok || !st.floorCtx) continue;
+    const preload = st.floorCtx * st.total.msgs;
+    dispatchOverhead.seats += 1; dispatchOverhead.preloadTokens += preload; dispatchOverhead.seatInputTokens += inTok;
+    if (preload / inTok > 0.6) {
+      dispatchOverhead.heavy += 1;
+      if (dispatchOverhead.heavySeats.length < 8) dispatchOverhead.heavySeats.push({ type: a.meta.agentType || '(unknown)', msgs: st.total.msgs, floor: st.floorCtx, share: Math.round((100 * preload) / inTok) });
+    }
+  }
+  return { agentTotal, grand, byType, skillRows, unattributed, docRows, inject, attach, mcpServers, tools, dispatchOverhead };
+}
+
+// ---------- hook-block ledger (which GUARD fired, not just which tool was denied) ----------
+// The transcript shows a denied tool call, never WHICH hook denied it, so the per-hook block rate -
+// the number that says whether a gate is earning its keep or misfiring - was unmeasurable. The
+// guard hooks now append one row per block to <docs-path>/hook-blocks/<session>.jsonl; this reads
+// them. A block costs the denial text plus the retried turn, so the count IS the cost signal.
+// A DIRECTORY is the project's shared collection - one file per session - so reading all of it
+// attributes every other session's blocks to the one being analyzed (measured: a bundle's report
+// carried a sibling session's denial). The session being analyzed names its own file, so a
+// directory is narrowed to `<session-id>.jsonl` and, when that is absent, to nothing at all: an
+// empty tally is the truth, a neighbour's rows are not. Pass the file directly to bypass this.
+function readBlockLedger(target, sessionId) {
+  const out = { rows: 0, byHook: {}, firstTs: null, lastTs: null, rowTs: [] };
+  if (!target) return out;
+  let files = [];
+  try {
+    if (fs.statSync(target).isDirectory()) {
+      const own = sessionId ? path.join(target, `${sessionId}.jsonl`) : null;
+      files = own && fs.existsSync(own) ? [own] : [];
+    } else {
+      files = [target];
+    }
+  } catch { return out; }
+  // Read these SYNCHRONOUSLY - readJsonl above is stream-based and resolves a Promise, so a
+  // sync caller would return an empty tally before the first line arrived. These ledgers are one
+  // short row per block, so a plain readFileSync is both correct and cheap.
+  for (const f of files) {
+    let lines = [];
+    try { lines = fs.readFileSync(f, 'utf8').split('\n'); } catch { continue; }
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let o;
+      try { o = JSON.parse(line); } catch { continue; }
+      if (!o || !o.hook) continue;
+      // A probe row is a MEASUREMENT, not a block: the fork-liveness probe logs and denies nothing.
+      if (o.mode === 'probe') { out.probes = (out.probes || 0) + 1; out.probeKinds = out.probeKinds || {}; out.probeKinds[o.kind || 'probe'] = (out.probeKinds[o.kind || 'probe'] || 0) + 1; continue; }
+      out.rows += 1;
+      if (o.ts) out.rowTs.push({ ts: Date.parse(o.ts), hook: o.hook });
+      const e = out.byHook[o.hook] || (out.byHook[o.hook] = { blocks: 0, reasons: new Map(), events: new Set(), tools: new Set() });
+      e.blocks += 1;
+      if (o.event) e.events.add(o.event);
+      if (o.tool) e.tools.add(o.tool);   // rows from before the column exist without it - the cell stays empty
+      // Keyed by REASON, which carries the file the denial named - two blocks on two different
+      // files are two causes, and a table showing only the top one invited exactly that conflation
+      // (measured: a report asserted one shared cause across three rows, one of which named a
+      // different file and a real credential). The guard's own branch tag rides along when it set
+      // one, so a hook with several branches says which fired.
+      const r = String(o.reason || '').slice(0, 90);
+      const branch = o.detail && o.detail.branch ? String(o.detail.branch) : '';
+      const key = branch ? `[${branch}] ${r}` : r;
+      e.reasons.set(key, (e.reasons.get(key) || 0) + 1);
+      if (o.ts) {
+        if (!out.firstTs || o.ts < out.firstTs) out.firstTs = o.ts;
+        if (!out.lastTs || o.ts > out.lastTs) out.lastTs = o.ts;
+      }
+    }
+  }
+
+  return out;
+}
+
+// The transcript names the TOOL a denial hit and, when the harness prints the bracket, the hook
+// file. The JSON permission-decision route prints no bracket at all, so those land in
+// '(unattributed)' - and a reader then goes looking for a guard that was never missing. Every guard
+// writes a block-ledger row at the moment it denies, so the two join by TIME: nearest row inside
+// the window, each row consumed once. Measured on the case that filed this: 0.3s apart.
+const DENIAL_JOIN_MS = 5000;
+function joinUnattributedDenials(main, blockLedger) {
+  const stamps = (main.unattributedDenials || []).map((t) => Date.parse(t)).filter((n) => !Number.isNaN(n)).sort((a, b) => a - b);
+  const rows = ((blockLedger && blockLedger.rowTs) || []).slice().sort((a, b) => a.ts - b.ts);
+  const used = new Set();
+  const joined = {};
+  let matched = 0;
+  let worst = 0;
+  for (const at of stamps) {
+    let best = -1;
+    let bestD = Infinity;
+    for (let i = 0; i < rows.length; i++) {
+      if (used.has(i)) continue;
+      const d = Math.abs(rows[i].ts - at);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best < 0 || bestD > DENIAL_JOIN_MS) continue;
+    used.add(best);
+    matched += 1;
+    if (bestD > worst) worst = bestD;
+    joined[rows[best].hook] = (joined[rows[best].hook] || 0) + 1;
+  }
+  return { total: stamps.length, matched, joined, worstMs: worst };
+}
+
+function hookJoinStats(main, agents, hookLog, tools) {
+  const trTools = Object.values(tools).reduce((n, t) => n + t.calls, 0);
+  if (!hookLog.firstTs || !hookLog.lastTs) return { trTools, coverage: null };
+  // Compare only calls inside the ledger's own window: a ledger wired mid-session
+  // (instrumentation installed during the run) legitimately misses everything before
+  // its first row - measured at 67 of an 80-row "gap" in a real install session.
+  // A 35-58ms hook latency is NOT a coverage gap: comparing raw timestamps put the ledger row a
+  // few ms outside the transcript's own window and printed '1 call outside the window' plus a FALSE
+  // 'wired mid-session' line over 62/62 and 194/194 real coverage, across 16 bundles. Widen the
+  // window by the hook's own latency budget before comparing.
+  // Both sides are ISO STRINGS. `firstTs - HOOK_LATENCY_MS` on a string is NaN and every `>=`
+  // against NaN is false, so inWin was 0 for every session that had a ledger at all - the report
+  // printed '0% of tool calls are inside the ledger window' plus the very 'wired mid-session' line
+  // the latency budget above was added to remove. Re-derived by hand across the audited corpus, the
+  // true coverage of those same sessions runs 8/8, 10/10, 12/12, 25/25, 50/51 and 65/66. Parse to
+  // epoch milliseconds on BOTH sides before any arithmetic.
+  // 250ms was the first guess and it was too tight: the hook latencies measured in the audit
+  // corpus ran 183/190/213/259/300/331/333/497ms, so HALF of them fell outside the budget and the
+  // call they belong to read as out-of-window - which prints the false 'ledger wired mid-session'
+  // line this budget exists to remove. 750 clears the measured maximum with room; the window is a
+  // tolerance for one hook's own spawn time, not a semantic boundary, so widening it cannot pull
+  // in a call from a different phase of the session.
+  const HOOK_LATENCY_MS = 750;
+  const ms = (ts) => (typeof ts === 'number' ? ts : Date.parse(ts));
+  const firstMs = ms(hookLog.firstTs);
+  const lastMs = ms(hookLog.lastTs);
+  const allTs = [main, ...agents.map((a) => a.stats)].flatMap((src) => src.toolCallTs || []);
+  const inWin = allTs.filter((ts) => ms(ts) >= firstMs - HOOK_LATENCY_MS && ms(ts) <= lastMs + HOOK_LATENCY_MS).length;
+  // Anchor coverage to the ACTIVE window (after a mid-file /clear) - the raw span counted a
+  // dead 23h50m gap as uncovered session time, reporting ~6% coverage for a ~96%-covered
+  // 89-minute work window (measured).
+  const sessStart = main.clearTs && main.clearTs > main.firstTs ? main.clearTs : main.firstTs;
+  const sessSpan = sessStart && main.lastTs ? Date.parse(main.lastTs) - Date.parse(sessStart) : 0;
+  const covSpan = Math.max(0, Math.min(Date.parse(main.lastTs || hookLog.lastTs), Date.parse(hookLog.lastTs)) - Math.max(Date.parse(sessStart || hookLog.firstTs), Date.parse(hookLog.firstTs)));
+  const pct = sessSpan > 0 ? Math.round((100 * covSpan) / sessSpan) : 100;
+  // A quiet tail (zero calls after the ledger's last row) and a real coverage gap read the
+  // same in percentages - count the tail's calls so the report can tell them apart
+  // (measured: an idle 38%-of-session tail with 0 tool calls was reported as unlogged activity).
+  // `lastTs + HOOK_LATENCY_MS` on a string CONCATENATES ('...Z' + 250 = '...Z250'), so this was
+  // always false too and the quiet-tail line printed unconditionally.
+  const tailCalls = allTs.filter((ts) => ms(ts) > lastMs + HOOK_LATENCY_MS).length;
+  // CALL coverage leads, wall clock follows: a session whose last hour is one idle await_summary
+  // reads as 38% time-covered and 100% call-covered, and the second number is the true one.
+  const callPct = allTs.length ? Math.round((100 * inWin) / allTs.length) : 100;
+  // Per-side join. A call the harness rejects before PreToolUse leaves no ledger row, and a ledger
+  // row can have no transcript call (an ask the transcript never wrote) - a count-based 'unmatched'
+  // cancels the two into a false 40 vs 40 (measured). Match each in-window call to the nearest
+  // unused row of the same tool within the latency budget and list the leftovers on each side.
+  const allCalls = [main, ...agents.map((a) => a.stats)].flatMap((src) => src.toolCallIdx || []);
+  const rowsIdx = (hookLog.rowsIdx || []).map((r) => ({ ts: r.ts, tool: r.tool, ms: ms(r.ts), used: false }));
+  const unmatchedCalls = [];
+  let matchedCalls = 0;
+  for (const c of allCalls) {
+    const t = ms(c.ts);
+    if (!(t >= firstMs - HOOK_LATENCY_MS && t <= lastMs + HOOK_LATENCY_MS)) continue;
+    let best = null;
+    for (const r of rowsIdx) {
+      if (r.used || r.tool !== c.tool) continue;
+      const d = Math.abs(r.ms - t);
+      if (d <= HOOK_LATENCY_MS && (!best || d < best.d)) best = { r, d };
+    }
+    if (best) { best.r.used = true; matchedCalls += 1; } else unmatchedCalls.push({ ts: c.ts, tool: c.tool });
+  }
+  const unmatchedRows = rowsIdx.filter((r) => !r.used).map((r) => ({ ts: r.ts, tool: r.tool }));
+  return { trTools, coverage: {
+    inWin, callPct, pct, calls: allTs.length, outside: allTs.length - inWin, tailCalls, unmatched: Math.max(0, inWin - hookLog.rows),
+    latencyMs: HOOK_LATENCY_MS, matchedCalls,
+    unmatchedCallCount: unmatchedCalls.length, unmatchedCalls: unmatchedCalls.slice(0, 8),
+    unmatchedRowCount: unmatchedRows.length, unmatchedRows: unmatchedRows.slice(0, 8),
+  } };
+}
+
+// The window tier comes from a model id, and the two records that carry one can disagree. The
+// session's OWN reminder is the id it was started on; cost-state keys off the billing rows. Say
+// which one answered, and say it once - both renderers call this.
+function windowSource(main) {
+  const rem = main.modelIdReminder || null;
+  const cs = (main.modelIdsFull || []).join(', ') || null;
+  if (!rem && !cs) return null;
+  if (!rem) return `${cs} (from cost-state; the session's own model reminder is absent)`;
+  if (!cs) return `${rem} (the session's own model reminder)`;
+  const agree = main.modelIdsFull.includes(rem);
+  return agree
+    ? `${rem} (the session's own model reminder; cost-state agrees)`
+    : `${rem} (the session's own model reminder) - cost-state says ${cs}: the reminder wins, it is what the session ran on`;
+}
+
+// The user stopping a turn is neither an error nor a hook block, and a session whose LAST row is
+// the interrupt marker did not close, it was abandoned - both invisible before.
+function interruptLine(main) {
+  if (!main.userInterrupts) return null;
+  const ended = main.lastInterruptTs && main.lastTs && main.lastInterruptTs >= main.lastTs;
+  return `user interrupts ${main.userInterrupts}${ended ? ' - the session ENDS on one: it was abandoned by hand, not closed' : ''}`;
+}
+
+// ---------- the efficiency scorecard ----------
+// One row per practice, each a measured number with its denominator and what the number tests.
+// The report JUDGES the rows; the analyzer never scores a session - a rate is read against the
+// practice, the turn is opened before a row becomes a finding.
+function efficiencyRows(main, agg) {
+  const e = main.efficiency || {};
+  const rows = [];
+  const tsList = (arr, n = 6) => arr.slice(0, n).map((t) => (t ? String(t).slice(11, 19) : '?')).join(', ') + (arr.length > n ? ` … +${arr.length - n}` : '');
+  if (main.floorCtx) {
+    const share = main.total.cacheRead ? Math.round((100 * main.floorCtx * main.total.msgs) / main.total.cacheRead) : null;
+    rows.push({ practice: 'standing floor', measured: `~${fmt(main.floorCtx)} tok/msg${share != null ? `, ~${share}% of cache-read` : ''}`, tests: 'the always-on set is the one lever on this number - lint check 33 caps it, /claude-stack:status reports it per install' });
+  }
+  rows.push({
+    practice: 'cache continuity',
+    measured: `${e.cacheMisses || 0} miss(es), ~${fmt(e.cacheMissTokens || 0)} tok re-cached; ${e.expectedRebuilds || 0} expected rebuild(s) after compaction, ~${fmt(e.expectedRebuildTokens || 0)} tok${(e.cacheMissAt || []).length ? ` - misses at: ${tsList(e.cacheMissAt.map((x) => x.ts))}` : ''}`,
+    tests: "Claude Code's own miss rule (over 5% and at least 2,000 tok re-processed); a miss outside a compaction is a cache break - open the turn before it: a system-prompt change, a tool-set change, an idle past the TTL",
+  });
+  {
+    const cr = e.compactionRereads || [];
+    const files = cr.reduce((n, c) => n + c.files, 0), chars = cr.reduce((n, c) => n + c.chars, 0);
+    rows.push({ practice: 'compaction re-reads', measured: cr.length ? `${cr.length} compaction(s): ${files} file(s) read before one and again after it, ~${fmt(approxTok(chars))} tok` : 'no compaction', tests: 'what a compaction instruction should keep (the modified files, the plan, the commands) - a re-read after the summary is the summary having dropped it' });
+  }
+  {
+    const b = e.buildDirReads || { calls: 0, chars: 0, paths: {} };
+    const top = Object.entries(b.paths).sort((x, y) => y[1] - x[1]).slice(0, 4).map(([p, c]) => `${p.split(/[/\\]/).slice(-2).join('/')} ~${fmt(approxTok(c))}`).join(', ');
+    rows.push({ practice: 'build-dir reads', measured: `${b.calls} call(s), ~${fmt(approxTok(b.chars))} tok${top ? ` - top: ${top}` : ''}`, tests: 'node_modules / bin / obj / dist / coverage / lockfiles / logs on either route - the read guard has no class for these; the rate decides whether it gets one' });
+  }
+  {
+    const c = e.checks || {};
+    const t = c.test || { calls: 0, chars: 0, scoped: 0, whole: 0 };
+    const bashChars = ['Bash', 'PowerShell'].reduce((n, k) => n + ((agg.tools[k] && agg.tools[k].resultChars) || 0), 0);
+    const checkChars = ['test', 'build', 'lint', 'ci'].reduce((n, k) => n + ((c[k] && c[k].chars) || 0), 0);
+    const share = bashChars ? Math.round((100 * checkChars) / bashChars) : null;
+    rows.push({ practice: 'test and build runs', measured: `test ${t.calls} (${t.scoped} scoped, ${t.whole} whole-suite) ~${fmt(approxTok(t.chars))} tok; build ${(c.build || {}).calls || 0} ~${fmt(approxTok((c.build || {}).chars || 0))}; lint ${(c.lint || {}).calls || 0} ~${fmt(approxTok((c.lint || {}).chars || 0))}; ci ${(c.ci || {}).calls || 0}${share != null ? ` - ${share}% of shell result volume` : ''}`, tests: 'iterate on ONE test or project, run the whole suite once at the gate; the result chars are what lands in context - a green run needs its summary line, a red run earns its trace' });
+  }
+  {
+    const n = main.gitCommits || 0, k = e.commitsChecked || 0;
+    rows.push({ practice: 'checked commits', measured: n ? `${k} of ${n} commit(s) had a test, build, lint or ci-status call in the ${CHECK_WINDOW} tool calls before${(e.commitsUnchecked || []).length ? ` - unchecked at: ${tsList(e.commitsUnchecked)}` : ''}` : 'no commit', tests: 'a check the session can run, before the work is called done - ran, not necessarily green; open the run' });
+  }
+  rows.push({ practice: 'green claims', measured: `${(e.unverifiedGreenClaims || []).length} of ${e.greenClaims || 0} claim(s) that a check passed landed in a turn that ran no check${(e.unverifiedGreenClaims || []).length ? ` - at: ${tsList(e.unverifiedGreenClaims)}` : ''}`, tests: "evidence, not assertion - open each turn: a check run in an EARLIER turn, or in a dispatched seat's own transcript, is evidence the regex cannot see" });
+  rows.push({ practice: 'correction streaks', measured: `${(e.correctionStreaks || []).length} streak(s) (${STREAK_TURNS} short user turns in a row, each after a ${fmt(STREAK_LONG)}+ char answer, as guard-answer-length counts them)${(e.correctionStreaks || []).length ? ` at: ${tsList(e.correctionStreaks)}` : ''}; ${e.correctionTurns || 0} of ${e.longAnswered || 0} answer(s) over ${fmt(STREAK_LONG)} chars drew a short (under ${STREAK_SHORT} char) user turn`, tests: 'after two corrections the context holds the failed drafts: the format ask, or /clear with a prompt that carries what was learned; the second number is what the strict walk did not chain' });
+  rows.push({ practice: 'long answers', measured: `${e.longAnswers || 0} of ${e.finalAnswers || 0} final answer(s) over ${fmt(LONG_ANSWER)} chars of prose`, tests: "the answer budget - the user's own ask may have lifted it, check the prompt before scoring" });
+  {
+    const d = agg.dispatchOverhead || { seats: 0 };
+    rows.push({ practice: 'dispatch overhead', measured: d.seats ? `${d.heavy} of ${d.seats} seat(s) spent over 60% of their input re-sending their own first-message context; ~${fmt(d.preloadTokens)} of ~${fmt(d.seatInputTokens)} seat input tok is that context${d.heavySeats.length ? ` - ${d.heavySeats.slice(0, 4).map((h) => `${h.type} (${h.msgs} msg, ${h.share}%)`).join(', ')}` : ''}` : 'no dispatch', tests: 'a dispatch pays its preload before any work - a brief that returns less than that preload is a trade lost; a one-message seat is 100% by construction' });
+  }
+  return rows;
+}
+
+// The complement of every consumption table above it: one row per INSTALLED artifact, and the
+// unused names collapsed to one line per layer so a 79-skill install stays readable.
+function printInventoryBlock(invUse) {
+  if (!invUse) return;
+  const many = invUse.source.sessions > 1;
+  console.log(`\nINVENTORY vs USE (what the install HAS against what ${many ? `these ${invUse.source.sessions} sessions` : 'this session'} touched - a name listed and unused was installed and never reached)`);
+  console.log(`  source: skills/agents/rules from ${invUse.source.skills_agents_rules}; plugins from ${invUse.source.plugins}; MCP from ${invUse.source.mcps}`);
+  for (const L of inventoryLayers(invUse)) {
+    if (!L.rows) continue;
+    console.log(`  ${L.label.toUpperCase()} - used ${L.usedInstalled} of ${L.total} installed${L.observedOnly ? `, +${L.observedOnly} used but in no inventory the run could read` : ''}`);
+    if (L.used.length) console.log(`    ${pad('name', 38)} ${pad('source', 10)} ${pad('installed', 9)} ${pad('used', 9)} ${pad('how', 42)} first use`);
+    for (const r of L.used) console.log(`    ${pad(r.name, 38)} ${pad(r.source, 10)} ${pad(installedCell(r), 9)} ${pad(usedCell(r), 9)} ${pad(r.how.join(', '), 42)} ${r.firstUse || ''}`);
+    if (L.notObservable.length) console.log(`    always-on - in every prompt, use not observable (${L.notObservable.length}): ${L.notObservable.join(', ')}`);
+    if (L.unused.length) console.log(`    ${many ? 'never used' : 'unused'} (${L.unused.length}): ${L.unused.join(', ')}`);
+  }
+  console.log('  a plugin that ships only HOOKS can never score used here - a hook leaves no transcript record; and a catalog-sourced row proves the stack ships the artifact, never that this project installed it');
+}
+
+function printReport(main, agents, hookLog, window, blockLedger, invUse) {
+  const span = main.firstTs && main.lastTs ? new Date(main.lastTs) - new Date(main.firstTs) : null;
+  console.log(`Session ${path.basename(main.file, '.jsonl')}  ${main.firstTs || '?'} → ${main.lastTs || '?'} (${dur(span)})${main.ccVersion ? `  Claude Code ${main.ccVersion}` : ''}`);
+  if (main.clearTs && main.clearTs > main.firstTs) {
+    console.log(`  active window since last /clear: ${main.clearTs} → ${main.lastTs} (${dur(new Date(main.lastTs) - new Date(main.clearTs))}) - use this, not the raw span, for duration claims`);
+  }
+  if (window) console.log(`windowed: ${window.fromStr || 'start'} → ${window.toStr || 'end'} (subagents dispatched outside the window are excluded)`);
+  console.log(`user prompts ${main.userPrompts} · API messages ${main.total.msgs} · compactions ${main.compactions} · API errors ${main.apiErrors} · git commits ${main.gitCommits || 0}${main.prMerges ? ` (+${main.prMerges} pr-merge)` : ''}`);
+  // The PEAK is what every threshold in the stack keys off; the average understated it by 17-43%.
+  if (main.peakCtx) console.log(`peak ctx ${fmt(main.peakCtx)} per message${main.peakCtxAt ? ` (at ${main.peakCtxAt})` : ''} - the number every fresh-session threshold is measured against, not the average below`);
+  if (main.thinkingTokens) console.log(`thinking ${fmt(main.thinkingTokens)} tok (cost-state.modelUsage) - billed, and attributable to no single message: spike residuals close against this, not against tool output`);
+  if (main.floorCtx) {
+    const share = main.total.cacheRead ? Math.round((100 * main.floorCtx * main.total.msgs) / main.total.cacheRead) : null;
+    console.log(`standing inventory ~${fmt(main.floorCtx)} tok/msg (system prompt + tool schemas + CLAUDE.md + always-on rules) - paid on EVERY message${share != null ? `, ~${share}% of cache-read` : ''}, and re-paid in full after every compaction`);
+  }
+  {
+    const src = windowSource(main);
+    if (src) console.log(`model (with window suffix) ${src} - the assistant messages strip the suffix, and it is what picks the context tier`);
+    const il = interruptLine(main);
+    if (il) console.log(il);
+  }
+  if (main.totalCostUSD != null) console.log(`billed $${Number(main.totalCostUSD).toFixed(2)} (cost-state)`);
+  if (main.untranscribed) console.log('untranscribed calls: cost-state cache-read ' + fmt(main.costState.cacheRead) + ' vs transcript ' + fmt(main.total.cacheRead) + ' - gap ' + fmt(main.untranscribed.cacheRead) + (main.untranscribed.contexts != null ? ' (~' + main.untranscribed.contexts + 'x the peak context)' : '') + ': the harness' + String.fromCharCode(39) + 's post-turn recap call(s) are billed and written to no transcript row - the bundle reconciles to its bill only with this line');
+  if (main.forkPrefix && main.forkPrefix.msgs) console.log('fork prefix: ' + main.forkPrefix.msgs + ' msgs / ' + fmt(main.forkPrefix.cacheRead) + ' cache-read / ' + main.forkPrefix.toolCalls + ' tool calls carry another session' + String.fromCharCode(39) + 's id (' + main.forkPrefix.sessionIds.join(', ') + ') - a copied prefix of that transcript, counted there; this file' + String.fromCharCode(39) + 's own tail is ' + (main.total.msgs - main.forkPrefix.msgs) + ' msgs / ' + fmt(main.total.cacheRead - main.forkPrefix.cacheRead) + ' cache-read, and the ledger cross-check is judged over that tail only');
+  if (main.stopHookBlocks) console.log(`Stop-hook denials ${main.stopHookBlocks} - these arrive as meta user TEXT, not tool results, so they are absent from the hook-blk column below`);
+  if (main.harnessDenials) console.log(`Harness denials ${main.harnessDenials} - read as a block (auto-mode classifier, a foreground sleep, a tool-schema failure) but no stack hook ran: excluded from hook-blk, never charge a guard for them`);
+  {
+    const byHook = Object.entries(main.denialsByHook || {}).sort((a, b) => b[1] - a[1]);
+    if (byHook.length) console.log(`denials by hook: ${byHook.map(([h, n]) => `${h}×${n}`).join(', ')} - the bracket is attribution only; '(unattributed)' is the JSON permission route, not a missing block`);
+    const dj = joinUnattributedDenials(main, blockLedger);
+    if (dj.matched) console.log(`  joined by ledger timestamp (within ${Math.round(dj.worstMs)}ms): ${Object.entries(dj.joined).map(([h, n]) => `${h}×${n}`).join(', ')}${dj.matched < dj.total ? ` - ${dj.total - dj.matched} still unattributed` : ''}`);
+  }
+  for (const c of main.compactionEvents || []) {
+    console.log(`  compaction ${c.ts || '?'}: ${c.pre != null ? fmt(c.pre) : '?'} -> ${c.post != null ? fmt(c.post) : '?'} tok, dropped ${c.dropped != null ? fmt(c.dropped) : '?'}${c.durationMs ? `, ${dur(c.durationMs)}` : ''}${c.trigger ? ` (${c.trigger})` : ''}`);
+  }
+  {
+    const evs = (main.apiErrorEvents || []).filter((e) => e.ctx != null);
+    if (evs.length) console.log(`  API errors fired at ctx ${evs.slice(0, 5).map((e) => `~${fmt(e.ctx)}`).join(', ')}${evs.length > 5 ? ` … +${evs.length - 5} more` : ''} - a cluster at high ctx is context pressure, not provider flakiness`);
+  }
+  if (main.unheldStopCandidates && main.unheldStopCandidates.length) {
+    const cands = main.unheldStopCandidates;
+    console.log(`  ${cands.length} unheld-stop candidate${cands.length === 1 ? '' : 's'} (free-text user turn right after a no-tool end_turn - check each against the active skill's stop contract): ${cands.slice(0, 10).map((c) => `${c.stopTs}→${c.userTs || '?'}`).join(', ')}${cands.length > 10 ? ` … +${cands.length - 10} more` : ''}`);
+  }
+  const agg = computeAggregates(main, agents);
+
+  console.log('\nTOKENS (deduped per API message; ctx/msg = avg context re-sent per call)');
+  console.log(`  ${pad('scope / model', 22)} ${rpad('input', 8)} ${rpad('cache-write', 11)} ${rpad('cache-read', 11)} ${rpad('output', 8)} ${rpad('msgs', 6)} ${rpad('ctx/msg', 8)}`);
+  console.log(tallyRow('main session', main.total));
+  for (const [m, t] of Object.entries(main.byModel)) console.log(tallyRow('  ' + m, t));
+  if (ctxOf(main.total) > CTX_WARN) {
+    console.log(`  ! avg context/msg ${fmt(ctxOf(main.total))} - the cost driver is carried-forward conversation, not tool output:`);
+    console.log(`    run pipeline steps in fresh sessions that resume from the plan file instead of one long chat.`);
+  }
+  if (agents.length) {
+    console.log(tallyRow(`subagents (${agents.length})`, agg.agentTotal));
+    console.log(tallyRow('TOTAL', agg.grand));
+  }
+
+  if (agents.length) {
+    console.log('\nSUBAGENTS (exact per-dispatch cost, grouped by agent type)');
+    console.log(`  ${pad('agent type', 28)} ${rpad('n', 3)} ${rpad('output', 8)} ${rpad('cache-read', 11)} ${rpad('msgs', 5)} ${rpad('wall', 7)}  top tools`);
+    for (const [type, g] of Object.entries(agg.byType).sort((a, b) => b[1].tally.output - a[1].tally.output)) {
+      const top = Object.entries(g.tools).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`).join(' ');
+      // seat-time is printed for EVERY multi-dispatch group: when seats overlap it shows the
+      // parallelism win, when they don't it stops the outer span being read as per-seat cost
+      // (measured: a 1h17m span over ~22m of actual seat activity framed as 'most expensive pair').
+      const waves = g.n > 1 && g.span > g.wall * 1.5 ? `, dispatched in waves over ${dur(g.span)}` : '';
+      console.log(`  ${pad(type, 28)} ${rpad(g.n, 3)} ${rpad(fmt(g.tally.output), 8)} ${rpad(fmt(g.tally.cacheRead), 11)} ${rpad(g.tally.msgs, 5)} ${rpad(dur(g.wall), 7)}  ${top}${g.n > 1 ? ` (seat-time ${dur(g.seatMs)}${waves})` : ''}`);
+      if (g.descs.length) console.log(`  ${pad('', 28)} e.g. ${g.descs.map((d) => JSON.stringify(d.slice(0, 40))).join(', ')}`);
+    }
+  }
+
+  if (agg.skillRows.length) {
+    // Main and subagent attribution are printed SPLIT, never summed: a dispatched seat
+    // inherits whatever skill stamp was last active in the main session, so a seat type
+    // foreign to the skill (a verifier charged to an installer command) means the stamp
+    // bled from an adjacent run - measured in a real session, where 223 verifier msgs
+    // landed on a plugin-update command that dispatches nothing.
+    console.log('\nSKILLS (cmd = slash invocations; calls = Skill tool invocations; attributed = API msgs stamped while the skill was active - the real cost signal)');
+    console.log('  (sub rows list the seat types carrying the stamp - a seat type foreign to the skill = stamp bleed from an adjacent run, do not charge it)');
+    console.log(`  ${pad('skill', 44)} ${rpad('cmd', 4)} ${rpad('calls', 5)} ${rpad('result', 9)} ${rpad('attr msgs', 9)} ${rpad('attr out', 9)} ${rpad('attr cache-rd', 13)}`);
+    for (const r of agg.skillRows) {
+      const carried = r.mAttr.carriedMsgs ? ` (${r.mAttr.carriedMsgs} carried${r.mAttr.maxCarryRun >= 30 ? ', carry likely stale - a frozen stamp absorbing later phases' : ''})` : '';
+      const comp = r.mAttr.companionMsgs ? ` (+${r.mAttr.companionMsgs} via companion loads, ~${fmt(r.mAttr.companionOut || 0)} of the out)` : '';
+      const folded = r.folded && !r.mAttr.msgs;
+      const msgCell = folded ? `folded -> ${r.folded}` : r.mAttr.msgs + carried + comp;
+      console.log(`  ${pad(r.skill, 44)} ${rpad(r.cmd || '', 4)} ${rpad(r.inv.calls, 5)} ${rpad('~' + fmt(approxTok(r.inv.injectedChars)), 9)} ${rpad(msgCell, 9)} ${rpad(folded ? '-' : fmt(r.mAttr.output), 9)} ${rpad(folded ? '-' : fmt(r.mAttr.cacheRead), 13)}`);
+      if (r.sub.msgs) {
+        const seats = Object.entries(r.sub.types).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t}×${n}`).join(' ');
+        console.log(`  ${pad(`    sub: ${seats}`, 44)} ${rpad('', 4)} ${rpad('', 5)} ${rpad('', 9)} ${rpad(r.sub.msgs, 9)} ${rpad(fmt(r.sub.output), 9)} ${rpad(fmt(r.sub.cacheRead), 13)}`);
+      }
+    }
+    if (agg.unattributed.n || agg.unattributed.selfInvoked) {
+      const types = Object.entries(agg.unattributed.types).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t}×${n}`).join(' ');
+      const guesses = Object.entries(agg.unattributed.guesses).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}×${n}`).join(' ');
+      const self = agg.unattributed.selfInvoked ? ` (+${agg.unattributed.selfInvoked} more stamped only by their own Skill calls)` : '';
+      if (agg.unattributed.n) console.log(`  (${agg.unattributed.n} dispatched seat${agg.unattributed.n === 1 ? '' : 's'} carry no skill stamp and are uncosted above: ${types}${guesses ? `; dispatch-window suggests ${guesses} - inferred, cite as such, never charge` : ''} - attribution coverage, not fewer dispatches)${self}`);
+      else console.log(`  ${self.trim()}`);
+    }
+  }
+
+  if (Object.keys(agg.docRows).length || agg.inject || agg.attach) {
+    console.log('\nGENERATED DOCS (capture-doc consumption; reads = orientation happening, writes = capture/loop maintenance)');
+    console.log(`  ${pad('doc', 44)} ${rpad('main-reads', 10)} ${rpad('agent-reads', 11)} ${rpad('writes', 6)}`);
+    for (const [rel, r] of Object.entries(agg.docRows).sort((a, b) => (b[1].main + b[1].agents) - (a[1].main + a[1].agents))) {
+      const bash = (r.bashReads || r.bashWrites) ? `  (+${r.bashReads || 0}r/${r.bashWrites || 0}w via Bash)` : '';
+      console.log(`  ${pad(rel, 44)} ${rpad(r.main, 10)} ${rpad(r.agents, 11)} ${rpad(r.writes, 6)}${bash}`);
+    }
+    if (agg.attach) console.log(`  ${pad('(style rule attached on file touch)', 44)} ${rpad('-', 10)} ${rpad('-', 11)} ${rpad('-', 6)}  ×${agg.attach}`);
+    if (agg.inject) console.log(`  ${pad('(style injected by legacy hook)', 44)} ${rpad('-', 10)} ${rpad('-', 11)} ${rpad('-', 6)}  ×${agg.inject}`);
+  }
+
+  if (Object.keys(agg.mcpServers).length) {
+    console.log('\nMCP (main + subagents; results measured in chars, shown as ~tokens)');
+    console.log(`  ${pad('server', 18)} ${rpad('calls', 5)} ${rpad('results', 9)} ${rpad('errors', 6)}  top tools`);
+    for (const [server, m] of Object.entries(agg.mcpServers).sort((a, b) => b[1].calls - a[1].calls)) {
+      const top = Object.entries(m.tools).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`).join(' ');
+      console.log(`  ${pad(server, 18)} ${rpad(m.calls, 5)} ${rpad('~' + fmt(approxTok(m.resultChars)), 9)} ${rpad(m.errors, 6)}  ${top}`);
+    }
+  }
+
+  printInventoryBlock(invUse);
+
+  console.log('\nTOOLS (main + subagents; result volume = what lands back in context; declines = the USER answering an ask, never a failure; hook-blk = PreToolUse denials - a denial may be a FALSE POSITIVE, so read the block before scoring it as the gate working)');
+  console.log(`  ${pad('tool', 28)} ${rpad('calls', 5)} ${rpad('results', 9)} ${rpad('errors', 6)} ${rpad('declines', 9)} ${rpad('hook-blk', 8)}`);
+  {
+    // Top 15 by result volume, PLUS any dropped row carrying errors or hook blocks - a
+    // 100%-error tool must never vanish on low volume (measured: 2/2-error browser_click did).
+    const rows = Object.entries(agg.tools).sort((a, b) => b[1].resultChars - a[1].resultChars);
+    const shown = rows.slice(0, 15).concat(rows.slice(15).filter(([, t]) => t.errors > 0 || t.hookBlocks > 0));
+    for (const [name, t] of shown) {
+      console.log(`  ${pad(name, 28)} ${rpad(t.calls, 5)} ${rpad('~' + fmt(approxTok(t.resultChars)), 9)} ${rpad(t.errors, 6)} ${rpad(t.declines || '', 9)} ${rpad(t.hookBlocks || '', 8)}`);
+    }
+  }
+  {
+    const errs = Object.entries(agg.tools).filter(([, t]) => (t.errorTs || []).length);
+    if (errs.length) {
+      console.log('\n  errors, by WHEN they landed (attribute them to the phase running at that time, never to the loudest one):');
+      for (const [name, t] of errs) {
+        const ts = t.errorTs.slice(0, 6).map((x) => String(x).slice(11, 19)).join(', ');
+        console.log(`  ${pad(name, 28)} ${rpad(t.errors, 5)} ${ts}${t.errorTs.length > 6 ? ` … +${t.errorTs.length - 6}` : ''}`);
+      }
+    }
+  }
+  if (main.topResults && main.topResults.length) {
+    console.log('\n  biggest single results (the call is named, so nothing has to be mapped back by hand):');
+    for (const r of main.topResults.slice(0, 8)) {
+      console.log(`  ${pad(r.name + (r.label ? ` ${r.label}` : ''), 60)} ${rpad('~' + fmt(approxTok(r.chars)), 9)} ${r.error ? 'error' : ''}`);
+    }
+  }
+
+  console.log('\nEFFICIENCY (the practice scorecard - measured numbers with their denominators; the rate is judged, never the presence)');
+  for (const r of efficiencyRows(main, agg)) {
+    console.log(`  ${pad(r.practice, 22)} ${r.measured}`);
+    console.log(`  ${pad('', 22)} tests: ${r.tests}`);
+  }
+
+  if (blockLedger && blockLedger.rows) {
+    console.log('\nHOOK BLOCKS (which guard fired; a block costs its denial text plus the retried turn)');
+    console.log(`  ${pad('hook', 32)} ${rpad('blocks', 6)} ${rpad('event / tool', 22)} top reason`);
+    for (const [h, e] of Object.entries(blockLedger.byHook).sort((a, b) => b[1].blocks - a[1].blocks)) {
+      const reasons = [...e.reasons.entries()].sort((a, b) => b[1] - a[1]);
+      const where = [...e.events].join(',') + (e.tools.size ? ' / ' + [...e.tools].join(',') : '');
+      console.log(`  ${pad(h, 32)} ${rpad(e.blocks, 6)} ${rpad(where, 22)} ${(reasons[0] && reasons[0][0]) || ''}${reasons[0] && reasons[0][1] > 1 ? ` x${reasons[0][1]}` : ''}`);
+      // Each further DISTINCT reason on its own line: they are different causes, and one line per
+      // hook made a report assert a single shared cause across rows that named different files.
+      for (const [r, n] of reasons.slice(1, 5)) console.log(`  ${pad('', 32)} ${rpad('', 6)} ${rpad('', 22)} ${r}${n > 1 ? ` x${n}` : ''}`);
+      if (reasons.length > 5) console.log(`  ${pad('', 32)} ${rpad('', 6)} ${rpad('', 22)} … +${reasons.length - 5} more distinct reason(s)`);
+    }
+    console.log(`  ${blockLedger.rows} block(s) total - review each distinct reason on its own; two reasons naming two files are two causes.`);
+  }
+  if (blockLedger && blockLedger.probes) console.log('\nPROBES ' + blockLedger.probes + ' row(s), log-only - denied nothing: ' + Object.entries(blockLedger.probeKinds).map(([k, n]) => k + ' x' + n).join(', ') + ' (a probe row is a measurement of how often the gate WOULD fire; judge its rate before it becomes a denial)');
+
+  if (main.spikes.length) {
+    console.log('\nCONTEXT SPIKES (main session - biggest single-turn context jumps and what landed before them)');
+    for (const sp of main.spikes) {
+      console.log(`  +${rpad(fmt(sp.delta), 7)} → ${fmt(sp.ctx)} ctx  ${sp.ts || '?'}  after: ${sp.causes || '(prompt/attachment only)'}`);
+    }
+  }
+
+  if (hookLog) {
+    console.log(`\nHOOK LOG join (${hookLog.rows} rows - identity ledger only, tokens come from the transcript)`);
+    for (const [tool, t] of Object.entries(hookLog.byTool).sort((a, b) => b[1].calls - a[1].calls).slice(0, 10)) {
+      const top = Object.entries(t.details).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([d, n]) => `${d}×${n}`).join(', ');
+      console.log(`  ${pad(tool, 28)} ${rpad(t.calls, 5)}  ${top}`);
+    }
+    const j = hookJoinStats(main, agents, hookLog, agg.tools);
+    if (j.coverage) {
+      console.log(`  coverage: ledger window ${hookLog.firstTs} → ${hookLog.lastTs} spans ~${j.coverage.pct}% of the session`);
+      console.log(`  cross-check: ${j.coverage.callPct}% of tool calls are inside the ledger window - ${j.coverage.inWin} of ${j.coverage.calls}${j.coverage.calls !== j.trTools ? ` (${j.trTools} in the file; the rest belong to the fork prefix)` : ''} - vs ${hookLog.rows} ledger rows`);
+      if (j.coverage.outside > 0) console.log(`  ${j.coverage.outside} call${j.coverage.outside === 1 ? '' : 's'} outside the ledger window (${j.coverage.tailCalls} after its last row${j.coverage.tailCalls === 0 ? ' - a quiet tail, not lost coverage' : ''}) - two causes, both real: a ledger wired mid-session legitimately misses the head, and a call the HARNESS rejected before PreToolUse (a classifier denial, a schema failure) never reaches a hook at all and can have no row`);
+      if (j.coverage.unmatchedCallCount) console.log('  ' + j.coverage.unmatchedCallCount + ' in-window call(s) with no ledger row of the same tool within ' + j.coverage.latencyMs + 'ms: ' + j.coverage.unmatchedCalls.map((c) => c.tool + '@' + c.ts).join(', ') + ' - a call the harness rejected before PreToolUse leaves no row');
+      if (j.coverage.unmatchedRowCount) console.log('  ' + j.coverage.unmatchedRowCount + ' ledger row(s) with no transcript call: ' + j.coverage.unmatchedRows.map((c) => c.tool + '@' + c.ts).join(', ') + ' - an ask or a call the transcript never wrote');
+      if (j.coverage.unmatched > 0) console.log(`  ${j.coverage.unmatched} in-window call${j.coverage.unmatched === 1 ? '' : 's'} with no ledger row - check each call's own tool_result for a Blocked:/error string (harness-level blocks and input-validation failures never reach PreToolUse) before calling it a gap`);
+    } else {
+      console.log(`  cross-check: transcript saw ${j.trTools} tool calls vs ${hookLog.rows} hook rows (ledger rows carry no timestamps, so window coverage is unavailable)`);
+    }
+  }
+}
+
+// ---------- markdown report skeleton ----------
+// --report-md emits the per-session report SKELETON: every table is machine-written,
+// so a report author cannot misquote the numbers (measured: 5 wrong claims across 4
+// hand-written session reports, each a prose restatement of tool output). The FILL IN
+// sections at the end are the only judgment surface.
+function inventoryMarkdown(invUse, out) {
+  if (!invUse) return;
+  const many = invUse.source.sessions > 1;
+  out.push('## Inventory vs use', '');
+  out.push(`_Inventory source: skills/agents/rules from ${invUse.source.skills_agents_rules}; plugins from ${invUse.source.plugins}; MCP from ${invUse.source.mcps}._`, '');
+  out.push(`_The installed set is resolved PER SESSION from that session's own \`cwd\`, so \`installed\` reads K of the ${invUse.source.sessions} session(s) this run covered and a name nothing installed is never reported as unused._`, '');
+  out.push('_Every row is an artifact an install HAS. A path-scoped rule is scored from the transcript records that name it (a `nested_memory` attach, guard-read-whole-file\'s shell-route notice) and by a glob proxy over the files the session touched; an always-on rule is in every prompt, so its use is not observable at all. A plugin that ships only HOOKS can never score used here, and a catalog-sourced row proves the stack ships the artifact, never that this project installed it._', '');
+  for (const L of inventoryLayers(invUse)) {
+    if (!L.rows) continue;
+    out.push(`### ${L.label.charAt(0).toUpperCase()}${L.label.slice(1)} (used ${L.usedInstalled} of ${L.total} installed${L.observedOnly ? `, +${L.observedOnly} used but in no inventory the run could read` : ''})`, '');
+    if (L.used.length) {
+      out.push('| name | source | installed | used | how | first use |', '|---|---|---|---|---|---|');
+      for (const r of L.used) out.push(`| ${r.name} | ${r.source} | ${installedCell(r)} | ${usedCell(r)} | ${r.how.join(', ')} | ${r.firstUse || ''} |`);
+      out.push('');
+    }
+    if (L.notObservable.length) out.push(`> always-on - in every prompt, use not observable (${L.notObservable.length}): ${L.notObservable.join(', ')}`, '');
+    if (L.unused.length) out.push(`> ${many ? 'never used' : 'unused'} (${L.unused.length}): ${L.unused.join(', ')}`, '');
+  }
+}
+
+function printMarkdown(main, agents, hookLog, window, blockLedger, invUse) {
+  const extraFacts = [];
+  if (main.peakCtx) extraFacts.push(`- **Peak context** ${fmt(main.peakCtx)} tokens per message${main.peakCtxAt ? ` (at ${main.peakCtxAt})` : ''} - every fresh-session threshold is measured against this, not the average.`);
+  if (main.thinkingTokens) extraFacts.push(`- **Thinking** ${fmt(main.thinkingTokens)} tokens (\`cost-state.modelUsage\`) - billed, attributable to no single message.`);
+  if (main.floorCtx) {
+    const share = main.total.cacheRead ? Math.round((100 * main.floorCtx * main.total.msgs) / main.total.cacheRead) : null;
+    extraFacts.push(`- **Standing inventory** ~${fmt(main.floorCtx)} tokens/message (system prompt + tool schemas + CLAUDE.md + always-on rules) - paid on EVERY message${share != null ? `, ~${share}% of cache-read` : ''}, and re-paid in full after every compaction.`);
+  }
+  {
+    const src = windowSource(main);
+    if (src) extraFacts.push(`- **Model (with window suffix)** ${src} - the assistant messages strip the suffix, and it is what picks the context tier.`);
+    const il = interruptLine(main);
+    if (il) extraFacts.push(`- **Interrupts** ${il.replace(/^user interrupts /, '')}`);
+  }
+  if (main.totalCostUSD != null) extraFacts.push(`- **Billed** $${Number(main.totalCostUSD).toFixed(2)} (\`cost-state\`).`);
+  if (main.untranscribed) extraFacts.push('- **Untranscribed calls** cost-state cache-read ' + fmt(main.costState.cacheRead) + ' vs transcript ' + fmt(main.total.cacheRead) + ' - gap ' + fmt(main.untranscribed.cacheRead) + (main.untranscribed.contexts != null ? ' (~' + main.untranscribed.contexts + 'x the peak context)' : '') + ': the harness' + String.fromCharCode(39) + 's post-turn recap call(s) are billed and written to no transcript row.');
+  if (main.forkPrefix && main.forkPrefix.msgs) extraFacts.push('- **Fork prefix** ' + main.forkPrefix.msgs + ' msgs / ' + fmt(main.forkPrefix.cacheRead) + ' cache-read / ' + main.forkPrefix.toolCalls + ' tool calls carry another session' + String.fromCharCode(39) + 's id (' + main.forkPrefix.sessionIds.join(', ') + ') - a copied prefix, counted under that transcript; this file' + String.fromCharCode(39) + 's own tail is ' + (main.total.msgs - main.forkPrefix.msgs) + ' msgs / ' + fmt(main.total.cacheRead - main.forkPrefix.cacheRead) + ' cache-read.');
+  if (main.stopHookBlocks) extraFacts.push(`- **Stop-hook denials** ${main.stopHookBlocks} - meta user TEXT, not tool results, so absent from the \`hook-blk\` column.`);
+  if (main.harnessDenials) extraFacts.push(`- **Harness denials** ${main.harnessDenials} - the auto-mode classifier, a foreground \`sleep\`, or a tool-schema failure. They read as a block and no stack hook ran: excluded from \`hook-blk\`, and never charged to a guard.`);
+  {
+    const byHook = Object.entries(main.denialsByHook || {}).sort((a, b) => b[1] - a[1]);
+    if (byHook.length) extraFacts.push(`- **Denials by hook**: ${byHook.map(([h, n]) => `\`${h}\` x${n}`).join(', ')} - the bracket is attribution only; \`(unattributed)\` is the JSON permission route.`);
+    const dj = joinUnattributedDenials(main, blockLedger);
+    if (dj.matched) extraFacts.push(`- **Unattributed denials joined by ledger timestamp** (within ${Math.round(dj.worstMs)}ms): ${Object.entries(dj.joined).map(([h, n]) => `\`${h}\` x${n}`).join(', ')}${dj.matched < dj.total ? ` - ${dj.total - dj.matched} still unattributed.` : '.'}`);
+  }
+  for (const c of main.compactionEvents || []) {
+    extraFacts.push(`- **Compaction** ${c.ts || '?'}: ${c.pre != null ? fmt(c.pre) : '?'} -> ${c.post != null ? fmt(c.post) : '?'} tokens, dropped ${c.dropped != null ? fmt(c.dropped) : '?'}${c.durationMs ? `, ${dur(c.durationMs)}` : ''}.`);
+  }
+  const agg = computeAggregates(main, agents);
+  const out = [];
+  const span = main.firstTs && main.lastTs ? new Date(main.lastTs) - new Date(main.firstTs) : null;
+  const mdTally = (label, t) => `| ${label} | ${fmt(t.input)} | ${fmt(t.cacheCreate)} | ${fmt(t.cacheRead)} | ${fmt(t.output)} | ${t.msgs} | ${fmt(ctxOf(t))} |`;
+
+  out.push(`# Stack usage report - session \`${path.basename(main.file, '.jsonl')}\``, '');
+  out.push('Generated by `analyze-usage.js --report-md` - every number in the tables below is the');
+  out.push("analyzer's own output. Fill ONLY the marked judgment sections; a claim there must cite a");
+  out.push('table row above, or a transcript measurement labeled as such.', '');
+  if (window) out.push(`> Windowed: ${window.fromStr || 'start'} → ${window.toStr || 'end'} (subagents dispatched outside the window are excluded)`, '');
+
+  out.push('## Environment', '');
+  out.push('| | |', '|---|---|');
+  out.push(`| Session window | ${main.firstTs || '?'} → ${main.lastTs || '?'} (${dur(span)}) |`);
+  if (main.clearTs && main.clearTs > main.firstTs) {
+    out.push(`| Active window (since last /clear) | ${main.clearTs} → ${main.lastTs} (${dur(new Date(main.lastTs) - new Date(main.clearTs))}) - use this, not the raw span, for duration claims |`);
+  }
+  if (main.ccVersion) out.push(`| Claude Code (this session's transcript) | ${main.ccVersion} |`);
+  out.push(`| Volume | ${main.userPrompts} user prompts · ${main.total.msgs} API messages · ${main.compactions} compactions · ${main.apiErrors} API errors |`);
+  {
+    const evs = (main.apiErrorEvents || []).filter((e) => e.ctx != null);
+    if (evs.length) out.push(`| API errors fired at ctx | ${evs.slice(0, 5).map((e) => `~${fmt(e.ctx)}`).join(', ')}${evs.length > 5 ? ` … +${evs.length - 5} more` : ''} - a cluster at high ctx is context pressure, not provider flakiness |`);
+  }
+  out.push(`| Git commits (Bash occurrence count) | ${main.gitCommits || 0}${main.prMerges ? ` (+${main.prMerges} pr-merge)` : ''} |`);
+  if (main.unheldStopCandidates && main.unheldStopCandidates.length) {
+    const cands = main.unheldStopCandidates;
+    out.push(`| Unheld-stop candidates | ${cands.length} (free-text user turn right after a no-tool end_turn; check each against the active skill's stop contract): ${cands.slice(0, 10).map((c) => `${c.stopTs}→${c.userTs || '?'}`).join(', ')}${cands.length > 10 ? ` … +${cands.length - 10} more` : ''} |`);
+  }
+  out.push(`| Models (main) | ${Object.entries(main.byModel).map(([m, t]) => `\`${m}\` ×${t.msgs}`).join(', ') || '-'} |`);
+  out.push(`| Subagent transcripts | ${agents.length} |`);
+  out.push(`| Hook ledger | ${hookLog ? `joined (${hookLog.rows} rows)` : 'absent - identity attribution unavailable, not inferred'} |`, '');
+  if (extraFacts.length) out.push('', ...extraFacts, '');
+
+  out.push('## Tokens (deduped per API message; ctx/msg = avg context re-sent per call)', '');
+  out.push('| scope | input | cache-write | cache-read | output | msgs | ctx/msg |', '|---|---|---|---|---|---|---|');
+  out.push(mdTally('main session', main.total));
+  for (const [m, t] of Object.entries(main.byModel)) out.push(mdTally(`- ${m}`, t));
+  if (agents.length) { out.push(mdTally(`subagents (${agents.length})`, agg.agentTotal)); out.push(mdTally('**TOTAL**', agg.grand)); }
+  out.push('');
+  if (ctxOf(main.total) > CTX_WARN) {
+    out.push(`> ! avg context/msg ${fmt(ctxOf(main.total))} - the cost driver is carried-forward conversation, not tool output: run pipeline steps in fresh sessions that resume from the plan file instead of one long chat.`, '');
+  }
+
+  if (agents.length) {
+    out.push('## Subagent dispatches (exact per-dispatch cost, grouped by agent type)', '');
+    out.push('| agent type | n | output | cache-read | msgs | wall | top tools |', '|---|---|---|---|---|---|---|');
+    for (const [type, g] of Object.entries(agg.byType).sort((a, b) => b[1].tally.output - a[1].tally.output)) {
+      const top = Object.entries(g.tools).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`).join(' ');
+      const waves = g.n > 1 && g.span > g.wall * 1.5 ? `, dispatched in waves over ${dur(g.span)}` : '';
+      out.push(`| ${type} | ${g.n} | ${fmt(g.tally.output)} | ${fmt(g.tally.cacheRead)} | ${g.tally.msgs} | ${dur(g.wall)}${g.n > 1 ? ` (seat-time ${dur(g.seatMs)}${waves})` : ''} | ${top} |`);
+    }
+    out.push('');
+  }
+
+  if (agg.skillRows.length) {
+    out.push('## Skills (attribution split main vs sub)', '');
+    out.push('A `sub:` row names the seat types carrying the stamp - a seat type foreign to the skill is');
+    out.push('stamp bleed from an adjacent run: report it as bleed, never charge it to the skill.');
+    out.push('`cmd` = slash invocations counted from command markers; `(N carried)` = msgs attributed by');
+    out.push('carry-forward after the stamp dropped at a task-notification - inferred, not stamped.');
+    out.push('`(+N via companion loads)` = msgs a nested in-protocol reference load would have stolen,');
+    out.push('folded back into the invoking skill, and `folded -> <skill>` on the companion row itself -');
+    out.push('its cost is charged there, so the row is not a run that cost nothing; `carry likely stale` = an unbroken 30+-msg carry run -');
+    out.push("a frozen stamp absorbing later phases, flag it, don't charge it.", '');
+    out.push('| skill | cmd | calls | result | attr msgs | attr out | attr cache-rd |', '|---|---|---|---|---|---|---|');
+    for (const r of agg.skillRows) {
+      const carried = r.mAttr.carriedMsgs ? ` (${r.mAttr.carriedMsgs} carried${r.mAttr.maxCarryRun >= 30 ? ', carry likely stale' : ''})` : '';
+      const comp = r.mAttr.companionMsgs ? ` (+${r.mAttr.companionMsgs} via companion loads, ~${fmt(r.mAttr.companionOut || 0)} of the out)` : '';
+      const folded = r.folded && !r.mAttr.msgs;
+      const msgCell = folded ? `folded -> ${r.folded}` : `${r.mAttr.msgs}${carried}${comp}`;
+      out.push(`| ${r.skill} | ${r.cmd || ''} | ${r.inv.calls} | ~${fmt(approxTok(r.inv.injectedChars))} | ${msgCell} | ${folded ? '-' : fmt(r.mAttr.output)} | ${folded ? '-' : fmt(r.mAttr.cacheRead)} |`);
+      if (r.sub.msgs) {
+        const seats = Object.entries(r.sub.types).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t}×${n}`).join(' ');
+        out.push(`| - sub: ${seats} | | | | ${r.sub.msgs} | ${fmt(r.sub.output)} | ${fmt(r.sub.cacheRead)} |`);
+      }
+    }
+    if (agg.unattributed.n || agg.unattributed.selfInvoked) {
+      const types = Object.entries(agg.unattributed.types).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t}×${n}`).join(' ');
+      const guesses = Object.entries(agg.unattributed.guesses).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}×${n}`).join(' ');
+      const self = agg.unattributed.selfInvoked ? ` +${agg.unattributed.selfInvoked} more stamped only by their own Skill calls.` : '';
+      if (agg.unattributed.n) out.push('', `> ${agg.unattributed.n} dispatched seat${agg.unattributed.n === 1 ? '' : 's'} carry no skill stamp and are uncosted in the rows above: ${types}${guesses ? `; dispatch-window suggests ${guesses} - inferred, cite as such, never charge` : ''} - attribution coverage, not fewer dispatches (cross-check the Subagent dispatches table).${self}`);
+      else out.push('', `>${self}`);
+    }
+    out.push('');
+  }
+
+  const docEntries = Object.entries(agg.docRows).sort((a, b) => (b[1].main + b[1].agents) - (a[1].main + a[1].agents));
+  if (docEntries.length || agg.inject || agg.attach) {
+    out.push('## Generated docs (reads = orientation happening, writes = capture/loop maintenance)', '');
+    out.push('_A **lower bound**. This table reads the Bash command text, so doc I/O routed through a script the session WROTE and then ran is invisible to it - measured at 5 reported against >=53 real. When a session writes its own helper, name that script here and treat the counts as a floor._', '');
+    out.push('| doc | main-reads | agent-reads | writes | via Bash (r/w) |', '|---|---|---|---|---|');
+    for (const [rel, r] of docEntries) out.push(`| ${rel} | ${r.main} | ${r.agents} | ${r.writes} | ${(r.bashReads || r.bashWrites) ? `${r.bashReads || 0}/${r.bashWrites || 0}` : ''} |`);
+    if (agg.attach) out.push(`| (style rule attached on file touch) | - | - | ×${agg.attach} | |`);
+    if (agg.inject) out.push(`| (style injected by legacy hook) | - | - | ×${agg.inject} | |`);
+    out.push('');
+  }
+
+  const mcpEntries = Object.entries(agg.mcpServers).sort((a, b) => b[1].calls - a[1].calls);
+  if (mcpEntries.length) {
+    out.push('## MCP (main + subagents)', '');
+    out.push('| server | calls | results | errors | top tools |', '|---|---|---|---|---|');
+    for (const [server, m] of mcpEntries) {
+      const top = Object.entries(m.tools).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n}×${c}`).join(' ');
+      out.push(`| ${server} | ${m.calls} | ~${fmt(approxTok(m.resultChars))} | ${m.errors} | ${top} |`);
+    }
+    out.push('');
+  }
+
+  inventoryMarkdown(invUse, out);
+
+  out.push('## Tools (main + subagents; result volume = what lands back in context)', '');
+  out.push('`hook-blk` = PreToolUse denials. A denial is not automatically the gate working - it may be a FALSE POSITIVE, and a false positive costs the denial text plus the whole retried turn. Read the block before scoring it. (Shipped verbatim over sessions whose blocks were 2 of 2 and 3 of 3 false positives, across 11 bundles.)', '');
+  out.push('| tool | calls | results | errors | declines | hook-blk |', '|---|---|---|---|---|---|');
+  {
+    const rows = Object.entries(agg.tools).sort((a, b) => b[1].resultChars - a[1].resultChars);
+    const shown = rows.slice(0, 15).concat(rows.slice(15).filter(([, t]) => t.errors > 0 || t.hookBlocks > 0));
+    for (const [name, t] of shown) {
+      out.push(`| ${name} | ${t.calls} | ~${fmt(approxTok(t.resultChars))} | ${t.errors} | ${t.declines || ''} | ${t.hookBlocks || ''} |`);
+    }
+  }
+  out.push('');
+  {
+    const errs = Object.entries(agg.tools).filter(([, t]) => (t.errorTs || []).length);
+    if (errs.length) {
+      out.push('### Errors, by when they landed', '');
+      out.push('Attribute each error to the phase that was RUNNING at that time. Measured: two errors at');
+      out.push('06:57 were reported as the browser phase\'s, and the browser work started ~07:2x.', '');
+      out.push('| tool | errors | timestamps |', '|---|---|---|');
+      for (const [name, t] of errs) {
+        out.push(`| ${name} | ${t.errors} | ${t.errorTs.slice(0, 6).map((x) => String(x).slice(11, 19)).join(', ')}${t.errorTs.length > 6 ? ` … +${t.errorTs.length - 6}` : ''} |`);
+      }
+      out.push('');
+    }
+  }
+  if (main.topResults && main.topResults.length) {
+    out.push('### Biggest single results', '');
+    out.push('Each row is ONE call with its own label - the Bash description the model wrote, the file a');
+    out.push('Read named, the seat a dispatch went to - so a result size never has to be mapped back onto');
+    out.push('a call by hand (measured: one report re-derived eight of these by eye).', '');
+    out.push('| tool | what the call asked for | result | when |', '|---|---|---|---|');
+    for (const r of main.topResults.slice(0, 8)) {
+      out.push(`| ${r.name}${r.error ? ' (error)' : ''} | ${r.label || ''} | ~${fmt(approxTok(r.chars))} | ${r.ts || ''} |`);
+    }
+    out.push('');
+  }
+
+  out.push('## Efficiency scorecard (machine-written; judge the rate, never the presence)', '');
+  out.push('Each row measures the session against one practice - the official Claude Code guidance and the stack\'s own audits agree on all of them. A number here is not yet a finding: the row says what to open before it becomes one.', '');
+  out.push('| practice | measured | what it tests |', '|---|---|---|');
+  for (const r of efficiencyRows(main, agg)) out.push(`| ${r.practice} | ${r.measured.replace(/\|/g, '\\|')} | ${r.tests.replace(/\|/g, '\\|')} |`);
+  out.push('');
+
+  if (main.spikes.length) {
+    out.push('## Context spikes (main session)', '');
+    out.push('| Δ | to ctx | when | after |', '|---|---|---|---|');
+    for (const sp of main.spikes) out.push(`| +${fmt(sp.delta)} | ${fmt(sp.ctx)} | ${sp.ts || '?'} | ${sp.causes || '(prompt/attachment only)'} |`);
+    out.push('');
+  }
+
+  if (hookLog) {
+    const j = hookJoinStats(main, agents, hookLog, agg.tools);
+    out.push('## Hook-log join (identity ledger; tokens come from the transcript)', '');
+    if (j.coverage) {
+      out.push(`- Coverage: ledger window ${hookLog.firstTs} → ${hookLog.lastTs} spans ~${j.coverage.pct}% of the session.`);
+      out.push(`- Cross-check: ${j.coverage.callPct}% of tool calls are inside the ledger window - ${j.coverage.inWin} of ${j.coverage.calls}${j.coverage.calls !== j.trTools ? ` (${j.trTools} in the file; the rest belong to the fork prefix)` : ''} - vs ${hookLog.rows} ledger rows.`);
+      if (j.coverage.outside > 0) out.push(`- ${j.coverage.outside} call${j.coverage.outside === 1 ? '' : 's'} outside the ledger window (${j.coverage.tailCalls} after its last row${j.coverage.tailCalls === 0 ? ' - a quiet tail, not lost coverage' : ''}) - two causes, both real: a ledger wired mid-session legitimately misses the head, and a call the HARNESS rejected before PreToolUse (a classifier denial, a schema failure) never reaches a hook and can have no row.`);
+      if (j.coverage.unmatchedCallCount) out.push('- ' + j.coverage.unmatchedCallCount + ' in-window call(s) with no ledger row of the same tool within ' + j.coverage.latencyMs + 'ms: ' + j.coverage.unmatchedCalls.map((c) => c.tool + '@' + c.ts).join(', ') + ' - a call the harness rejected before PreToolUse leaves no row.');
+      if (j.coverage.unmatchedRowCount) out.push('- ' + j.coverage.unmatchedRowCount + ' ledger row(s) with no transcript call: ' + j.coverage.unmatchedRows.map((c) => c.tool + '@' + c.ts).join(', ') + ' - an ask or a call the transcript never wrote.');
+      if (j.coverage.unmatched > 0) out.push(`- ${j.coverage.unmatched} in-window call${j.coverage.unmatched === 1 ? '' : 's'} with no ledger row - check each call's own tool_result for a Blocked:/error string (harness-level blocks and input-validation failures never reach PreToolUse) before calling it a gap.`);
+    } else {
+      out.push(`- ${j.trTools} transcript tool calls vs ${hookLog.rows} ledger rows (ledger rows carry no timestamps, so window coverage is unavailable).`);
+    }
+    out.push('');
+  }
+
+  // The markdown emitter never received the ledger at all, so the bundle reports the sweeps
+  // actually read carried no guard-block section - 7 confirmations, while the terminal report
+  // printed one from the same data.
+  out.push('## Guard blocks - FILL IN (which guard fired; a block costs its denial text plus the retried turn)', '');
+  if (blockLedger && blockLedger.rows) {
+    out.push('_A block is not automatically the gate working. A FALSE positive is the most expensive event in this table - it costs the denial plus the whole retried turn - so read each top reason and say whether it stopped honest work._', '');
+    out.push('_Answer that below the table: one line per ROW, saying whether that reason caught something or stopped honest work._', '');
+    out.push('_ONE ROW PER DISTINCT REASON, not per hook: a reason carries the file the denial named, so two reasons under one hook are two causes and must be judged separately (measured: a report asserted one shared cause across three rows, one of which named a different file and a real credential)._', '');
+    out.push('| hook | blocks | event / tool | reason |', '|---|---|---|---|');
+    for (const [hook, e] of Object.entries(blockLedger.byHook).sort((a, b) => b[1].blocks - a[1].blocks)) {
+      const where = [...e.events].join(',') + (e.tools.size ? ' / ' + [...e.tools].join(',') : '');
+      for (const [r, n] of [...e.reasons.entries()].sort((x, y) => y[1] - x[1])) {
+        out.push(`| \`${hook}\` | ${n} | ${where} | ${String(r).replace(/\|/g, '\\|')} |`);
+      }
+    }
+    out.push('', `${blockLedger.rows} block(s) total.`, '');
+  } else {
+    out.push('_No ledger rows. That means EITHER no guard fired OR the ledger was never written - say which, do not infer. The transcript alone records which TOOL was denied, never which hook._', '');
+    out.push('_This is a QUESTION to answer here, in one line, from the ledger test you ran: `no guard fired` (the ledger path was absent AND the Tools table shows no `hook-blk`), or `ledger absent` (there ARE hook-blk denials and the hook that fired is unavailable). Shipped unanswered, verbatim, in audited bundles._', '');
+  }
+  out.push('## Waste analysis - FILL IN', '', '_Ranked by tokens wasted. Every claim cites a table row above, or a transcript measurement labeled as such._', '');
+  out.push('## Protocol check - FILL IN', '', "_One verdict per skill run, judged against that skill's own SKILL.md steps, citing the transcript turn that proves it. Mark unavailable rather than inferring._", '');
+  out.push('## Efficiency verdict - FILL IN', '');
+  out.push('_Two lines, both mandatory, each citing scorecard rows or table rows above:_', '');
+  out.push('- **TOKEN VERDICT**: delivered <what the session left behind> / cost <total tokens from the Tokens table> / avoidable <N of M tok, P%> - the avoidable share is a measured number built from the rows above (re-reads, whole-suite output, build-dir reads, cache misses, dispatch overhead), never an adjective. A session that spent heavily and delivered is a PASS - say so.');
+  out.push('- **EFFECTIVENESS**: did the work land (the artifact, the commits and whether each was checked), how many corrections it took (the correction-streak row plus every user redirect you read), how many green claims had no check behind them, how many stops were not held (the protocol check\'s sweep 1). One line, numbers with denominators.', '');
+  out.push('## Verdict - FILL IN', '', '| skill | worked as intended | biggest strength | biggest waste source | one concrete suggestion |', '|---|---|---|---|---|', '');
+  console.log(out.join('\n'));
+}
+
+// Exported for the tests: the join's arithmetic shipped broken (ISO string minus a number = NaN,
+// so every ledger-joined session printed '0% of tool calls are inside the ledger window') and
+// stayed broken because nothing could reach the function to pin it.
+module.exports = { hookJoinStats, readBlockLedger, docRelPath, joinUnattributedDenials, windowSource, interruptLine, globToRe, parseFrontmatter };
+
+// ---------- entry ----------
+
+async function main() {
+  const args = process.argv.slice(2);
+  const flagVal = (flag) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
+  const flagValIdx = new Set(['--hook-log', '--hook-blocks', '--from', '--to', '--docs-root', '--inventory', '--plugins'].map((f) => args.indexOf(f) + 1).filter((i) => i > 0));
+  const target = args.find((a, i) => !a.startsWith('--') && !flagValIdx.has(i));
+  const asJson = args.includes('--json');
+  const asMd = args.includes('--report-md');
+  const hookFile = flagVal('--hook-log');
+  const blockDir = flagVal('--hook-blocks');
+  const docsRoot = flagVal('--docs-root');
+  const inventoryDir = flagVal('--inventory');
+  const pluginsFile = flagVal('--plugins');
+  // one spelling for both routes: backslashes normalized, `./` dropped, one trailing slash
+  if (docsRoot) {
+    const r = String(docsRoot).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '') + '/';
+    if (!docsPrefixes.includes(r)) docsPrefixes.push(r);
+  }
+  const fromStr = flagVal('--from'), toStr = flagVal('--to');
+  const window = fromStr || toStr
+    ? { from: fromStr ? Date.parse(fromStr) : null, to: toStr ? Date.parse(toStr) : null, fromStr, toStr }
+    : null;
+  if (!target || (window && (Number.isNaN(window.from) || Number.isNaN(window.to)))) {
+    console.error('usage: analyze-usage.js <session.jsonl | sessions-dir> [--from <ISO ts>] [--to <ISO ts>] [--hook-log <tool-usage.jsonl>] [--hook-blocks <dir|file>] [--docs-root <path>] [--inventory <.claude dir>] [--plugins <installed_plugins.json>] [--json] [--report-md]');
+    process.exit(1);
+  }
+
+  if (fs.statSync(target).isDirectory()) {
+    // rollup mode: one line per session under the directory, newest first. RECURSIVE - a
+    // collected corpus nests one folder per project and one per session, and the flat one-level
+    // history folder is just the depth-0 case of the same walk.
+    const files = findSessionFiles(target)
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    if (!asJson) console.log(`  ${pad('session', 38)} ${pad('start', 12)} ${rpad('output', 8)} ${rpad('cache-read', 11)} ${rpad('msgs', 6)} ${rpad('ctx/msg', 8)} ${rpad('agents', 6)} ${rpad('agent-out', 9)}`);
+    const grand = newTally();
+    // Fed one session at a time and never held as a list: the corpus answer must not cost the
+    // corpus. Each session's installed set is resolved from its OWN cwd (cached per cwd, so a
+    // one-project folder resolves exactly once), because a corpus spans projects that installed
+    // different things and one project's inventory would report the rest's names as unused.
+    const acc = newInventoryUse(loadPlugins(pluginsFile));
+    const rollupJson = { sessions: [] };
+    for (const f of files) {
+      const s = await analyzeTranscript(f, window);
+      const agents = await analyzeSubagents(f, window);
+      addSessionUse(acc, s, agents, inventoryDir);
+      const at = newTally();
+      for (const a of agents) mergeTally(at, a.stats.total);
+      mergeTally(grand, s.total); mergeTally(grand, at);
+      const row = `  ${pad(path.basename(f, '.jsonl'), 38)} ${pad((s.firstTs || '?').slice(0, 10), 12)} ${rpad(fmt(s.total.output), 8)} ${rpad(fmt(s.total.cacheRead), 11)} ${rpad(s.total.msgs, 6)} ${rpad(fmt(ctxOf(s.total)), 8)} ${rpad(agents.length, 6)} ${rpad(fmt(at.output), 9)}`;
+      if (asJson) rollupJson.sessions.push({ session: path.basename(f, '.jsonl'), start: s.firstTs, total: s.total, agents: agents.length });
+      else console.log(row);
+    }
+    const invUse = acc.sessions ? finishInventoryUse(acc) : null;
+    if (asJson) { console.log(JSON.stringify({ ...rollupJson, total: grand, inventory: invUse }, null, 2)); return; }
+    console.log(`  ${pad('TOTAL', 38)} ${pad('', 12)} ${rpad(fmt(grand.output), 8)} ${rpad(fmt(grand.cacheRead), 11)} ${rpad(grand.msgs, 6)}`);
+    printInventoryBlock(invUse);
+    console.log('\nRun again with one session file for the full skills/MCP/tools/spikes report.');
+    return;
+  }
+
+  const mainStats = await analyzeTranscript(target, window);
+  const agents = await analyzeSubagents(target, window);
+  const hookLog = hookFile ? await analyzeHookLog(hookFile) : null;
+  // ONE ledger read, handed to every emitter. --report-md and --json used to drop it entirely,
+  // so the bundle reports that quote the markdown - the ones the sweeps actually read - carried no
+  // guard-block section at all (7 confirmations), while the terminal report had it.
+  const blockLedger = readBlockLedger(blockDir, path.basename(target, '.jsonl'));
+  const invAcc = newInventoryUse(loadPlugins(pluginsFile));
+  addSessionUse(invAcc, mainStats, agents, inventoryDir);
+  const invUse = finishInventoryUse(invAcc);
+  if (asJson) {
+    // The join's own numbers were computed only at RENDER time, so `--json` could not see them and
+    // nothing could test them - which is how the NaN cross-check above shipped and stayed shipped.
+    // Fold them into the dump beside the ledger they describe.
+    const join = hookLog ? hookJoinStats(mainStats, agents, hookLog, computeAggregates(mainStats, agents).tools) : null;
+    const hl = hookLog ? (({ rowsIdx, ...rest }) => rest)(hookLog) : hookLog;   // the row index is the join's input, not a report field
+    const body = { main: mainStats, agents, hookLog: hl && join ? { ...hl, ...join.coverage ? { coverage: join.coverage } : {} } : hl, hookBlocks: blockLedger, dispatchOverhead: computeAggregates(mainStats, agents).dispatchOverhead, inventory: invUse };
+    console.log(JSON.stringify(window ? { window: { from: fromStr, to: toStr }, ...body } : body, null, 2));
+    return;
+  }
+  if (asMd) {
+    printMarkdown(mainStats, agents, hookLog, window, blockLedger, invUse);
+    return;
+  }
+  printReport(mainStats, agents, hookLog, window, blockLedger, invUse);
+}
+
+// Run only as a COMMAND. Required as a module (the tests, which need to reach hookJoinStats),
+// it must define its functions and do nothing else - otherwise the require prints the usage
+// line and exits 1 before a single assertion runs.
+if (require.main === module) main().catch((e) => { console.error(e.message); process.exit(1); });

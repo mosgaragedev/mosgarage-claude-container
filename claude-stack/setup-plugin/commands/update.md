@@ -1,0 +1,430 @@
+---
+description: "FAST refresh of an existing claude-stack install - no selection questions: bring everything currently installed to the newest release, MCP runtimes and plugins included (pinned MCPs re-resolved and re-registered, then VERIFIED against the manifest shape and repaired where a registration drifted - `claude mcp add` over an existing name exits 0 without writing, so a stale entry used to survive every update; `claude plugin update` per installed stack plugin, at the scope the plugin is actually installed at) AND prune what the stack itself deleted or renamed upstream since the stamped install. The common case (upstream removed nothing) is one script-driven pass: the installer's --installed-only derives the selection from disk and refreshes it, nothing else loads. The prune list is computed from the GitHub compare between the stamp and the new snapshot, never guessed - plus the snapshot's meta/migrations.json entries for retired GENERATED artifacts (existence-detected, e.g. the legacy inject-code-style hook) that a file compare can never name. User-authored artifacts and the generated baseline-project-*.md / project-code-style.md rules can never be touched. One confirmation before anything is deleted. NOT for choosing items to add or drop - that is the sibling configure command; not a first install - that is setup."
+disable-model-invocation: true
+---
+
+# Update the Claude stack - refresh everything, prune what upstream removed
+
+You are refreshing an existing install to the newest release, unchanged in shape: the same
+items, new content - including the MOVING parts: the installer re-resolves every pinned MCP
+runtime to its newest published version and re-registers it, and runs `claude plugin update` on
+each installed stack plugin after refreshing the marketplaces, so an update leaves no MCP or
+plugin behind on an old version - plus removing the artifacts the STACK removed upstream, which a plain
+refresh leaves orphaned forever. The deterministic work lives in scripts, not in this chat:
+the installer's `--installed-only` derives the selection from disk and closes its dependencies
+itself, and `stamp-compare.js` computes the upstream delta - you orchestrate and report.
+Measured before this split, a model-driven walk grew the session ~40k tokens; keep the fast
+path near 10k by never reading files or output the steps below do not name. **Budget the CALLS,
+not the characters.** The fast path is 5-6 Bash calls and nothing else. Content tokens are the
+small half of the bill: one audited run read 11.1k of file content and cost 886.8k, because every
+message re-sends the whole carried session. An extra grep is not 200 tokens, it is another full
+context re-send - so fold reads together rather than trimming what each one returns.
+
+## 0. Where to run it
+
+**This walk is script orchestration, not reasoning** - a stamp compare, an installer invocation, a
+grep over its log. It runs identically on the cheap tier and costs about a THIRD as much there
+(measured: the same scripted walk in the same project cost 3x on `opus[1m]` as on sonnet). A frontmatter
+`model:` key CAN pin a skill's run to a tier (the Claude Code skills frontmatter reference lists
+`model` and `effort` beside `allowed-tools`), and this command deliberately carries none: a pin
+every install inherits is a behaviour change that ships with its own evidence, and `/model` is the
+USER's command. So when this session is on an expensive tier, say it ONCE in the opening line - 'this walk is scripted;
+`/model sonnet` runs it for about a third' - and continue either way. Never ask about it, never
+repeat it.
+
+**House voice in every line this run emits** - narration, tables and the asks alike: single
+dashes, never em-dashes, and single quotes in prose. A fresh or refreshed install may have no
+`.claude/rules/baseline-interaction.md` loaded at all, so this command's own text is the only place
+the voice can come from (measured: a first-run narration line opened with an em-dash, on the one
+surface where the rule forbidding it cannot yet exist).
+
+**This run needs NO conversation context**, so it is the cheapest thing in the stack to move -
+but only out of a session that is actually loaded. Measure before you ask: this session's own
+per-message context is `input + cache_read + cache_creation` off the last assistant message in the
+transcript. Ask ONLY when that figure is past the same trigger `guard-fresh-session-start.js` uses
+- the tier's own absolute trigger, `CLAUDE_STACK_FRESH_SESSION_200K` (default 150,000) or
+`CLAUDE_STACK_FRESH_SESSION_1M` (default 400,000), or `CLAUDE_STACK_FRESH_SESSION_DEFAULT`
+(default 180,000) when the window is neither of those two sizes or cannot be read at all - which
+one applies comes from the session model's row in `.claude/hooks/model-windows.json`, else
+`CLAUDE_STACK_DEFAULT_CONTEXT_WINDOW` - or when that hook has already injected
+the ask into this turn. Below the trigger, or when the figure cannot be read at all, SKIP the ask
+silently and go to step 1: an ask with no measurement behind it is the failure this replaced
+(measured: it fired on the FIRST message of a brand-new session, twice in one run, and could quote
+no number when the user challenged it). Never author the decision in prose either way - and below the trigger that means NO line at
+all: not 'context is low, proceeding', not a one-clause aside. The only visible output of a
+skipped step 0 is that step 1 starts.
+
+When it does fire, put the choice through AskUserQuestion - run here anyway vs run in a fresh
+session (recommended). One ordering rule for every ask in this run: **never lead with an option
+the harness has already refused.** Once an installer invocation has come back denied, the
+recommended answer becomes 'you run it yourself' with the command to paste, and the settings rule
+that would pre-authorize it named beside it - re-offering the denied path as the recommendation
+buys a second identical denial (measured, and it drew the only free-text complaint in that
+session). The fast path is ~10k tokens on its own, but every one of its messages
+re-sends whatever this session already carries, so state the figure you measured and the ~10k
+budget beside it. Never quote a figure measured in another session: the number that used to sit
+here was ~2x over on lifetime cache-read and ~4.8x over on the tail when it was next checked.
+
+Every answer names the next action, and this step is not done until one is taken:
+
+| answer | next action |
+|---|---|
+| fresh session | give the paste-ready one-liner, end the turn, run nothing |
+| run here | go to step 1 now |
+| not now | say what is owed and end the turn - do not download |
+
+If the user redirects mid-answer and this ask is displaced, re-offer it ONCE when the redirect
+is handled, then proceed on their answer.
+
+**ONE release archive is the entire download - and the cache usually spares you even that** - the shared contract lives at
+`${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`; read it first and hold the whole run to
+it: resolve the snapshot once into `$TMP/repo` - a cached release copy when the version probe says it is current, a download when it is not, use every tool from that snapshot, hand it back
+with `--source` in the install step, and remove `$TMP` on EVERY exit path (fast, slow, blocker,
+or a user 'no'). The protocol's 'Narrate, don't trace' section governs every tool call: quiet
+machinery, no pasted output, one narration line between steps.
+
+## 1. Preconditions
+Project mode: cwd has a populated `.claude/` (skills/agents/rules/hooks present). Global mode:
+the account dir holds the skills (the installer lays agents/rules/hooks only into a git repo's
+`.claude/`, whatever the scope - a global refresh is skills-only). Nothing installed in either place -> stop and route to the
+sibling `/claude-stack:setup` command. The user names items to add or drop -> that is the
+sibling `/claude-stack:configure` command, not this one. OS: `darwin`/`linux` -> the sh
+installer; Windows -> the ps1 (via `pwsh`).
+
+## 2. Compute the delta since the stamp - ONE call
+Everything this step needs comes back from one script in the snapshot:
+
+```bash
+node "$TMP/repo/scripts/update-preflight.js" --snapshot "$TMP/repo" --root .
+```
+
+(Global mode: `--root <account dir>`. A fork install passes `--repo <owner/name>`; a
+non-default stamp or settings path passes `--stamp` / `--settings`.) This is the WHOLE
+pre-install read - never hand-write a second probe for anything it already prints, and never
+open `meta/migrations.json` yourself: the catalog is a maintainer file with a 2,000-character
+`_comment`, its `detect` rules are declarative, and the script evaluates them. Measured: the
+hand-run form cost four API round trips and pulled the catalog into context for what is a
+three-line existence check.
+
+It prints, in order:
+
+- `version: <old> -> <new>` then `base: <sha> head: <sha>` - lead your narration with the
+  version delta.
+- `status<TAB>path` lines (`modified`/`added`/`removed`, `renamed` with `<- old-path`) filtered
+  to stack-owned paths; the diff is what has been RELEASED since the stamp - work still on
+  `develop` is invisible by design, never diff against it.
+- `changed: skills=<n> agents=<n> rules=<n> hooks=<n> template=<yes|no>` - the delta bucketed by
+  install class. This is what step 7 names as refreshed, and what gates the
+  `/project-agent-capabilities` suggestion; the installer's log tail counts every file it
+  COPIED, which is all of them on every run, so it can never answer 'what changed'.
+- `migration: <id><TAB><detect kind>` per DETECTED entry, or `migrations: none detected`, each
+  followed by its own indented `why:` / `then:` / `remove:` / `unwire:` / `env-rename:` / `env-reset:` /
+  `env-remove:` lines - everything you act on. A detected entry joins the prune list labeled
+  `(migration: <why>)`. Do not open the catalog for any of it: an entry that did not fire prints
+  nothing, and reading 'just that one entry by id' still pulls the whole file in (measured: 2,182
+  of a 5,180-char read is the maintainer `_comment`, 42%, paid on every update of every project).
+- `env-keys: <names>` - the scope's settings.json `env` KEY NAMES before the run, and the
+  before-state step 7 diffs its read-back against. Names only: the script never prints a value,
+  and neither do you. **Never dump that file** - a plain `cat` of it put a live 71-character
+  `SENTRY_ACCESS_TOKEN` into a transcript twice in this collection. When you need to look again,
+  the safe reads are `node "$TMP/repo/stack/hooks/guard-secret-value.js" --redacted <settings.json>`
+  (every credential value shown as `<set (N chars)>`, the rest as written - the one form that
+  works when the key names are not known in advance) and `--presence <settings.json> KEY ...`
+  for named keys.
+
+**Environment migrations are the exception: they never join the prune list.** They act on the
+scope's settings.json `env`, and none of them can lose anything the user chose: `rename_settings_env`
+changes a KEY and carries the value across, and `remove_settings_env` drops a key this stack
+RETIRED - one nothing reads any more, and where the key still means something outside this stack it
+carries the exact seeded value it is dropped at, so a hand-set value stays. The installer's env pass
+applies them during the refresh in both step 3 and step 4
+(renames, then removals, then the absent-only seeds, so a value set under the old name is never
+overwritten by the new key's default).
+Your job is to detect them before the run and NAME them in the report: `env: <old> renamed to <new>
+(value kept)`, `env: <key> removed (retired)`. New variables the release introduces need no
+catalog entry at all - the same pass seeds them absent-only - but report those too, as
+`env: <key> seeded (<value>)`, reading the file after the run rather than assuming.
+
+**Build the prune list** from the compare's `removed` lines (a `stack/...` path gone entirely
+maps to its installed artifact; a path still present in the snapshot is a move WITHIN the item,
+not a removal), the `renamed` lines of installed items (both halves, automatically: old name
+pruned, new name joins the refresh - a rename is the same item continuing, never an adoption
+choice), and the detected migrations. Three outputs decide the path:
+
+- **Prune list EMPTY** -> step 3, the fast path. This includes `no-stamp` (exit 2 - no baseline,
+  pruning impossible, refreshing unaffected), `compare-unreachable` (exit 3 - same), and a
+  `TRUNCATED` line, third after the version + base lines (the removal list cannot be trusted complete - never prune from a
+  possibly-partial diff; route the reconcile to `configure` in the report). Say which applied.
+- **Prune list NON-EMPTY** -> step 4, the pruning path.
+
+## 3. Fast path - refresh in place (the common case)
+Run the installer; it derives the selection from disk itself, closes new dependencies through
+`stack-select.js`, and logs any `installed-only: required:` additions:
+
+- Unix: `bash "$TMP/repo/scripts/os/claude-stack.sh" update --source "$TMP/repo" --scope <scope> --installed-only [--space <name>] --keep-pins`
+- Windows: `pwsh -File "$TMP/repo/scripts/os/claude-stack.ps1" update -Source "$TMP/repo" -Scope <scope> -InstalledOnly [-Space <name>] -KeepPins`
+
+**Give that call a 10-minute timeout, and read its exit code.** A full refresh runs past the Bash
+tool's own default on a cold machine, and a timed-out call is BACKGROUNDED, not failed: the run then
+pays turns re-finding its own installer (measured: 3 recovery turns, one of them loading a tool
+schema it never called). Pass `timeout: 600000` on the call. A NON-ZERO exit stops the run - report
+the log's last lines verbatim as a blocker with the fix they name, and never continue to the prune,
+the close, or ad-hoc repair work: the measured breach spent 14 messages and 1.69M tokens on
+improvised forensics after exit 1 and then changed 226 files under the user's `.claude` with no ask.
+
+Scope/space mirror how the install was laid down; `--keep-pins` is the default here - a fast
+refresh must not flatten deliberate local model/effort pin edits. The refresh re-registers every MCP
+and then READS BACK what landed: at project scope the installer compares every stack-owned entry in
+`.mcp.json` against the manifest shape and rewrites the ones that drifted (`mcp repaired: <name>` in
+the log), because `claude mcp add` over a name the preceding `remove` did not clear prints 'already
+exists' and exits 0 - which is how consuming projects kept the pre-0.2.34 stdio sentry registration
+through update after update. Servers the project added by hand are never touched. Plugins are updated
+at the scope the listing says they are installed at and their versions are read back, so the log names
+each one as `x -> y` or `already newest` instead of asserting a refresh. The refresh re-registers every MCP;
+for sentry that means the constant `https://mcp.sentry.dev/mcp/${SENTRY_SLUG}` registration with
+the `Sentry-Bearer` header (an old plain-`Bearer` header, the broken v0.2.33-and-earlier default,
+migrates by itself; a deliberately headerless oauth registration is read back and kept). Playwright keeps its browsers the same
+way: every `playwright-<browser>` server is read back and re-registered (a legacy single `playwright` server
+migrates to `playwright-<its --browser>`, none = `chrome`), a `firefox` / `webkit` build is downloaded again
+for the refreshed server version, and the user's `/mcp` enable / disable toggles are left alone. Sentry
+environment plan, no question on this path: when sentry is installed, read the ACCOUNT
+`settings.json` env (`~/.claude/settings.json`, or the space's) and report - as ONE line in the
+close-out, with the file path - any of `SENTRY_SLUG` and (token mode) `SENTRY_ACCESS_TOKEN` still
+missing: the user adds them there by hand (`{ "env": { "SENTRY_SLUG": "<org>[/<project>]",
+"SENTRY_ACCESS_TOKEN": "<token>" } }`; never a project-level `.claude/settings.json`, its env does
+not reach `.mcp.json` - measured), exports them in the shell the installer runs in (the run writes
+every key it is handed into that file), or runs `/claude-stack:configure`, whose sentry plan asks the slug.
+
+**ONE post-install read.** When the installer returns, everything the report needs is in its log,
+so take it in a single call - never a tail, never a second grep. A tail is ~75% static boilerplate,
+and two consecutive greps of the same log (measured) cost two full context re-sends for one extra
+line:
+
+```bash
+grep -aE 'installed/refreshed this run|mcp repaired:|plugin [A-Za-z0-9_.-]+:|installed-only: required:|settings\.json env:|=set \(|=absent|serena project index|!!' "$TMP/install.log"
+```
+
+That one pattern carries every fact step 7 reports: the refresh counts, the repaired
+registrations, each plugin's `x -> y` or `already newest`, the dependencies the new release
+pulled in, every env key the run renamed / removed / seeded (the installer prints one line each -
+so the ENVIRONMENT line is READ, never asserted), the credential presence lines, the serena
+re-index hint and any fail-soft `!!`. Add a marker to the pattern when the report needs another
+fact; do not add a call. Never tail the log instead - a tail is ~75% static boilerplate and misses
+the lines above it.
+
+Presence, never the value - the line above already carries the installer's own `KEY=` presence
+output on most runs. Run this ONLY when that grep returned no `KEY=` line, and paste its lines
+as-is:
+`node "$TMP/repo/stack/hooks/guard-secret-value.js" --presence "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" SENTRY_SLUG SENTRY_ACCESS_TOKEN CONTEXT7_API_KEY`
+(the same line runs on Windows - Claude Code's Bash tool is Git Bash, where `$env:USERPROFILE` is not a variable; a `--space <name>` install reads `~/.claude-<name>/settings.json`). Output is `KEY=set (N chars)` or `KEY=absent` - nothing else is ever printed; a shell dump of that file is rewritten by the same hook into its redacted view (every credential value shown as `<set (N chars)>`), and the Read tool on it is blocked.
+
+The slug is not a secret and can be typed anywhere; the TOKEN never travels through the chat - offer
+this copy-ready command with that line, so the value goes from the user's clipboard into the file
+without passing through a transcript (it is not echoed, and it is not a shell argument either).
+**PASTE it into your reply. Never run it through Bash and never ask whether to run it** - it
+prompts for input this session cannot supply, it trips the credential guard, and the ask it
+generates has one sensible answer, which makes it a decision not worth a user's turn:
+
+```bash
+python3 -c "import getpass,json,pathlib;f=pathlib.Path('~/.claude/settings.json').expanduser();d=json.loads(f.read_text() or '{}') if f.exists() else {};d.setdefault('env',{})['SENTRY_ACCESS_TOKEN']=getpass.getpass('token (not echoed): ');f.parent.mkdir(parents=True,exist_ok=True);f.write_text(json.dumps(d,indent=2))"
+```
+
+On Windows: `$t = Read-Host 'token' -AsSecureString`, then write the same key with
+`ConvertFrom-SecureString -AsPlainText`. If the user pastes the token into the chat anyway, use it
+for what they asked and END THE TURN on the rotation ask - it is in the transcript on disk now, and
+that is their decision to make, not one to leave unsaid. Then:
+
+- The compare showed `stack/CLAUDE.template.md` modified -> reconcile the project's CLAUDE.md
+  additively (step 6). Otherwise skip it without reading either file.
+- Report per step 7 - version delta, refreshed counts from the installer's log tail, the
+  `required:` additions it named, and FYI `added` items from the compare (mapped to item names;
+  never install them - route adoption to `configure`).
+- EXCEPTION to FYI-only - and the installer now does most of it for you. Hooks are an
+  all-or-nothing layer on the `--installed-only` path: an install that HAS hooks receives every
+  hook the release ships, and the run logs `installed-only: adopting hook <name>` for each one.
+  A hook the user DROPPED is not resurrected - the stamp records the catalog each run shipped, so
+  'shipped then, absent now' reads as a deliberate drop and is left out, logged as such. NAME every
+  adopted hook in the step-7 report, one line with what it blocks.
+  Put adoption through AskUserQuestion only when the installer did NOT adopt it - a `guard-*`
+  ENFORCEMENT hook still absent after the run (the derivation fell back, or it was dropped before) -
+  and on 'adopt now' copy it from `$TMP/repo/stack/hooks/` into `.claude/hooks/` and wire its
+  matcher entries into settings.json exactly as the installer's hook step does. To author that ask,
+  read the hook's own header comment and nothing else (`head -8 "$TMP/repo/stack/hooks/<file>"`) -
+  every guard states what it blocks in its first lines; reading the hook to understand it cost 3.6k
+  tokens and the session's largest context spike in one audited run, for a one-sentence question.
+  (Measured, and the reason the layer became all-or-nothing: the v0.2.20 commit gate reached zero of
+  three consuming projects - every update surfaced it as an FYI the user exited past, while the same
+  updates refreshed the rule text the hook exists to enforce, leaving the discipline prose-only for
+  a week.)
+- Clean up `$TMP` and stop. Steps 4-5 never run on this path.
+
+## 4. Pruning path - confirm once, then refresh + prune
+Inventory the CURRENT selection from disk exactly as the sibling `configure` command's step 1
+(`${CLAUDE_PLUGIN_ROOT}/commands/configure.md` - read it only on THIS path; command bodies do
+not co-load): skills dirs, `agents/*.md`, `rules/*.md` (excluding the GENERATED
+`baseline-project-*.md` and `project-code-style.md`), hooks (bare basenames, excluding the
+GENERATED legacy `inject-code-style.js`), mcps from `<repo>/.mcp.json`, plugins fail-soft and
+filtered to entries enabled for THIS project (the listing is machine-global; an unfiltered read
+re-submits a sibling repo's plugin to this project's refresh - measured) - never from memory.
+
+Show the version delta, the refresh counts by category, and the NAMED prune list (migrations
+included, with their why). Ask ONE question through AskUserQuestion: proceed with refresh +
+prune (recommended), or refresh only. Nothing is ever deleted silently; 'refresh only' means
+step 3's installer run instead, then the report. For example:
+
+```
+claude-stack 0.1.0 -> 0.2.0 - refresh: 12 skills, 9 agents, 6 rules, 3 hooks
+prune: .claude/rules/web-conventions.md (renamed upstream; typescript-conventions.md carried over)
+```
+
+On 'proceed': selection = installed, minus the confirmed prune list, plus the new names of
+renames; write `raw.json`, run `stack-select.js --selection "$TMP/raw.json" --emit "$TMP/selection.txt"
+--check`. A `required:` line (a dependency the new release introduced) is auto-kept and
+reported. An `unknown:` line is an upstream retirement the compare missed - already excluded
+from the emitted selection; add it to the prune list (an MCP simply drops out of the
+regenerated `.mcp.json`; name it in the report). Blockers stop the run with their fixes -
+never update past one; warnings are listed and passed. Then run the installer as in step 3 but
+with `--selection "$TMP/selection.txt"` / `-Selection "$TMP/selection.txt"` in place of the installed-only
+flag.
+
+## 5. Prune
+Delete each item on the confirmed list, showing every command before running it. A deleted hook
+also loses its `.claude/settings.json` wiring in the same pass - show that edit too (a
+migration entry's `unwire_settings_hook` names exactly which entry goes - `<file>::<Matcher>`
+scopes it to ONE matcher when the file stays wired for its other events, and a
+`settings_hook_wired` detect matches on that wiring being present rather than on a file;
+parse-edit-rewrite,
+never regex, never touching other wiring). A migration's `then` line goes in the step-7 report
+as a next step - run nothing on the user's behalf.
+
+## 6. Reconcile the project's CLAUDE.md (project mode)
+Against the snapshot's `stack/CLAUDE.template.md`, ADDITIVELY, exactly as the sibling
+`configure` command's step 13: add sections the template gained, update the rules table for
+what this run pruned, never overwrite the project's own prose, show changes before writing.
+Skip in global mode.
+
+**Run the compare in project mode whatever the delta says** - the template being unchanged
+UPSTREAM says nothing about whether THIS project's CLAUDE.md still matches it, and the
+template-unchanged skip left that question with no command that answers it: not update, which
+skipped, and not validate, which touches only the rules table. Measured: a user asked it twice,
+verbatim, five and a half minutes apart. The compare is a 75-line file against a 116-line one, so
+cost is not the argument; when it comes back clean, say so in one clause and write nothing.
+
+## 7. Post-check
+Every line below is READ from something already in context - step 2's preflight output and the one
+post-install grep. Nothing here is stated from memory, and nothing needs another call.
+
+Report the version delta, then what actually CHANGED: step 2's `changed: skills=<n> agents=<n>
+rules=<n> hooks=<n> template=<yes|no>` line, naming the paths from the compare's own
+`status<TAB>path` rows. Do NOT report the installer's copy counts as the delta - it re-copies every
+installed file on every run, so its `installed/refreshed this run - skills=N` is the SELECTION size,
+not the change; an audited close named the two refreshed rules and omitted the two hooks that were
+the entire upstream delta, because it read the log tail instead of the compare. Then the pruned
+items by name, the REPAIRED line when the installer logged any (`mcp repaired: <name>` rows and the
+plugin version moves - these are the drift the run corrected, and a user who has been carrying a
+stale registration needs to see it named), the ENVIRONMENT line, the FYI additions routed to
+`configure`, and the restart line.
+
+- **ENVIRONMENT** - the installer prints one line per env change (`settings.json env: <old> renamed
+  to <new>`, `<key> removed (retired ...)`, `<key> seeded (<value>)`), and the grep already caught
+  them. Report those lines; when there are none, say 'env: nothing renamed, removed or seeded this
+  run' - a claim you can make because the log is silent AND step 2's `env-keys:` set is the
+  before-state you are comparing against. Never assert it from memory: three audited runs did, and
+  one named keys it had never probed.
+- **RESTART** - emit it whenever the installer's summary line shows `mcps=<n>` with n above 0, or
+  any hook file was refreshed. It is a report LINE, not a question: an audited run spent its one ask
+  slot on a credential and closed with no restart step at all, having re-registered all seven servers.
+- **VALIDATE** - when the version delta spans more than one release, add a `/claude-stack:validate`
+  row to the suggestion card: 'the install is <n> releases behind - update refreshed what IS
+  installed, validate is the only command that asks whether it still SHOULD be'. Update prunes only
+  what upstream deleted; a server or skill this project stopped needing is validate's
+  whole-stack-absent pass, and the word did not appear in this command at all.
+
+The run rewrote `claude-stack.stamp` - the next update or configure diffs from here. Name
+`/project-agent-capabilities` (when installed) as the USER's next step when step 2's `changed:`
+line shows `skills=` or `agents=` above 0 - the generated rule stamps each skill's first sentence,
+which drifts with content-only updates (measured: a 'roster unchanged, rule still accurate' skip
+left 7 of 10 stamped sentences stale and the user caught it manually). Gate it on THAT number and
+nothing else: keyed on 'the release refreshed any installed skill or agent file' the clause was
+permanently true, because the installer re-copies all of them every run - so the suggestion fired on
+runs where no skill had changed at all, and a user acted on one.
+One SECOND trigger for the same row, exact and two greps wide - the usage policy inside that
+generated rule ships verbatim from the skill and is never re-fetched, so a project can carry a
+two-release-old policy with nothing to notice it (measured: one project's rule still described the
+fresh-session gate as '40% of the context window, 150k floor', a spelling retired at 0.2.70):
+
+```bash
+grep -m1 -o 'policy-rev: [0-9a-f]*' .claude/rules/baseline-project-agent-capabilities.md
+grep -m1 -o 'policy-rev: [0-9a-f]*' "$TMP/repo/stack/skills/project-agent-capabilities/SKILL.md"
+```
+
+Different values, or a rule carrying no rev at all, names the row with THAT as its reason - 'the
+stamped policy is from an older release'. Equal, or no rule on disk, adds nothing.
+When serena is installed, also name the one-off re-index as a next step whenever this run
+re-seeded `.serena/project.yml` - an install predating the seeding has no `ignored_paths`, so its
+cache was built over serena's own language-server directory: `SERENA_HOME=.serena/home uvx --from
+serena-agent serena project index`. Never invoke it from this run - the skill is manual-only (`disable-model-invocation`), so a
+Skill call is DENIED by `guard-fresh-session-start.js`, which reads that flag from the skill's own
+frontmatter. Do not lean on the harness for it: measured both ways, one update run's call was
+refused and another slipped through. The report line is the mechanism.
+
+**The run closes on a suggestion card, never on a question.** After the report, list the
+follow-ups that are the USER's to run - restart for an MCP change, `/project-agent-capabilities`
+(when installed and the step-2 gate above fires), a manual-only capture whose output is stale, the
+serena re-index, a credential to rotate or set by
+hand - as `Suggested next steps`, the recommended one first and each with the one reason it
+matters. **When this run re-registered an MCP or replaced a hook file, the RESTART is row one** - with
+`claude mcp list` named beside it as the one command that confirms the servers actually connected
+(a registration is not a connection: measured, two stdio servers timed out at 30s and the session
+ran without them with nothing reporting it) - -
+every other follow-up runs against the session that is still holding the OLD ones, and a card that
+ranks a capture above it tells the user to re-capture an inventory that is not loaded yet (measured:
+a run that replaced two guard hooks and re-registered all four servers listed the re-capture first,
+and the user ran that first) ('`/project-agent-capabilities` - the update refreshed 12 skill files, so the generated
+rule's stamped sentences are stale'). A follow-up that is itself a deliberate run - any of the
+captures, a loop - carries a fresh-session note beside it: 'run it in a fresh session; started
+here it re-sends this walk's history on every one of its turns'. The guard cannot help with this
+one - a scripted update ends far below its trigger by design - and measured, two deliberate runs
+chained in one session cost about twice what the second cost run fresh. No AskUserQuestion over them - and read that narrowly:
+**it forbids an ask about the FOLLOW-UPS, nothing else.** The step-3 adoption ask for an added
+`guard-*` hook and the step-4 prune confirm are mandated by their own steps and are unaffected;
+'an update asks nothing by design' has been read as forbidding both, in the same project that also
+read it as permitting a closing ask. The follow-up ask was dropped as friction - the user's call,
+made knowing a prose next step was ignored 3 of 3 in one audited session, which is why the reason
+rides beside every step. Close with this line, verbatim, as the LAST line of the message - nothing
+after it:
+'Nothing is pending on this run - these are yours to run when you choose.' The stop-contract
+guard reads that sentence as a finished close; without it a 'done + next step' card is blocked
+as a stall and the guard demands the very ask this paragraph removes.
+The line is CONDITIONAL: print it only when the card carries nothing OWED. A still-required user action - revoke the old token, fill in a credential, run a rotation - IS pending, so name it and put the close through the ask instead (measured: one close stated 'Still owed: revoke the old token in Sentry's dashboard' and this line in the same message).
+
+## 8. Clean up the temp dir - ALWAYS
+Remove `$TMP` per `${CLAUDE_PLUGIN_ROOT}/references/source-protocol.md`, on EVERY exit path:
+after the fast path, after refresh + prune, after refresh-only, after a blocker, and after a
+user 'no'. Then confirm the project tree holds only installed artifacts by LOOKING, never with
+`git status`: the stack's own gitignore advice ignores `.claude/` wholesale, so a porcelain status
+over it is empty whatever is sitting there (measured: a run reported '`.claude` tree clean' from an
+empty status, on the same listing where its own earlier `ls` had shown a stray
+`claude-stack.stamp.testwrite`). `ls -a .claude` plus a check that no archive, extracted repo,
+`raw.json`, `selection.txt` or `install.log` was left in the project - anything stray is named in
+the close-out, not silently ignored.
+
+## Do not
+- Never delete anything the upstream diff or the migrations catalog did not name - user-authored
+  skills/agents/rules/hooks and the generated `baseline-project-*.md` / `project-code-style.md`
+  rules appear in neither; if a candidate is in neither list, it stays.
+- Never install additions and never remove an MCP or plugin the diff did not retire - adopting
+  or dropping by choice is the sibling `configure` command.
+- Never skip the step-4 confirm before deletions, never run past a blocker, and never leave
+  `$TMP` behind. Do not commit anything on the user's behalf.
+- Never re-derive in chat what a script already computed: no re-listing installed items on the
+  fast path, no reading the compare's raw API JSON, no paging installer output beyond the one
+  grep step 3 names, and no hand-written probe for anything step 2's preflight already printed.
+- **A fail-soft `!!` line is not a re-run trigger.** The installers log `!!` for a step that fell
+  back and CONTINUED - the fallback is the designed behaviour, and the line usually says so.
+  Report it; never re-run the installer end to end to feel sure. Measured: one run did, at about
+  half the session's total cost, and changed nothing.
+- Never run this walk on the expensive tier when a cheap one is available. It is script
+  orchestration - a preflight, an installer invocation, a grep and a report - not reasoning: the
+  same scripted walk cost 3x on a 1M-window opus session as on sonnet in the same project, for the
+  same output.
