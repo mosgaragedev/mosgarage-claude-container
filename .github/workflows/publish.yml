@@ -9,7 +9,7 @@ on:
     - cron: "0 * * * *"
 
 concurrency:
-  group: release-please-${{ github.repository }}
+  group: release-please-mosgarage-claude-container
   cancel-in-progress: false
 
 jobs:
@@ -20,7 +20,7 @@ jobs:
       issues: write
       pull-requests: write
     outputs:
-      dev_env_released: ${{ steps.release.outputs['packages/mosgarage-claude-hq--release_created'] }}
+      dev_env_released: ${{ steps.release.outputs['packages/mosgarage-claude-container--release_created'] }}
     steps:
       - uses: actions/checkout@v5
       - id: release
@@ -44,6 +44,6 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
       - run: npm publish --provenance --access public
-        working-directory: packages/mosgarage-claude-hq
+        working-directory: packages/mosgarage-claude-container
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
